@@ -510,6 +510,7 @@ dependencies = [
  "ratatui",
  "reins-core",
  "reins-proto",
+ "serde_json",
  "tokio",
  "vt100",
 ]

@@ -12,6 +12,7 @@ reins-core = { path = "../reins-core" }
 reins-proto = { path = "../reins-proto" }
 tokio.workspace = true
 anyhow.workspace = true
+serde_json.workspace = true
 ratatui = "0.28"
 crossterm = "0.28"
 vt100 = "0.15"
