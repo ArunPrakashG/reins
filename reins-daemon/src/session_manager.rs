@@ -80,6 +80,13 @@ impl SessionManager {
         Ok(self.store.list_sessions(project_id)?)
     }
 
+    /// Captures the current tmux pane text for a session. On-demand passthrough for
+    /// MVP: called fresh per request (see `Request::GetPaneSnapshot`) rather than
+    /// backed by a background poller.
+    pub fn capture_pane(&self, tmux_session_name: &str) -> Result<String, SessionManagerError> {
+        Ok(self.tmux.capture_pane(tmux_session_name)?)
+    }
+
     /// Finds a single session by its id.
     pub fn find_session(&self, session_id: &str) -> Result<Session, SessionManagerError> {
         self.store

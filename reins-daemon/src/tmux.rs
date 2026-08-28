@@ -70,6 +70,7 @@ impl TmuxController {
     }
 }
 
+#[cfg(test)]
 fn tmux_available() -> bool {
     std::process::Command::new("tmux")
         .arg("-V")

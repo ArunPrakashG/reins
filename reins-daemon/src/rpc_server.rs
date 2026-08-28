@@ -135,6 +135,21 @@ fn handle_request(
                 result: ResponseBody::Harnesses(harnesses),
             }
         },
+        Request::GetPaneSnapshot { session_id } => {
+            // On-demand passthrough: capture the tmux pane directly per request rather
+            // than maintaining a background poller + watch channel (the plan's original
+            // sketch). The TUI polls this endpoint itself on a timer, so a background
+            // task would duplicate that polling with extra state to manage for no
+            // practical behavioral difference. A future streaming upgrade (a persistent
+            // per-session byte stream) would replace this on-demand capture.
+            let result = manager
+                .find_session(&session_id)
+                .and_then(|session| manager.capture_pane(&session.tmux_session_name));
+            match result {
+                Ok(text) => Response::Ok { result: ResponseBody::PaneSnapshot(text) },
+                Err(e) => Response::Err { message: e.to_string() },
+            }
+        }
     }
 }
 
@@ -252,6 +267,80 @@ mod tests {
 
         let unknown_resp = send(&socket_path, &Request::Interrupt { session_id: "does-not-exist".into() }).await;
         assert!(matches!(unknown_resp, Response::Err { .. }));
+
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    #[tokio::test]
+    async fn get_pane_snapshot_returns_captured_tmux_pane_text() {
+        if std::process::Command::new("tmux").arg("-V").output().is_err() {
+            eprintln!("skipping: tmux not installed");
+            return;
+        }
+        let socket_path = std::env::temp_dir().join(format!("reins-test3-{}.sock", std::process::id()));
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut registry = AdapterRegistry::new();
+        registry.register(Box::new(reins_adapters::ClaudeCodeAdapterFactory));
+        let manager = Arc::new(SessionManager::new(registry, TmuxController, store));
+        let profiles = sample_profiles();
+
+        let path_clone = socket_path.clone();
+        let manager_clone = manager.clone();
+        let profiles_clone = profiles.clone();
+        tokio::spawn(async move {
+            run_control_server(&path_clone, manager_clone, profiles_clone).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        async fn send(socket_path: &Path, req: &Request) -> Response {
+            let mut stream = UnixStream::connect(socket_path).await.unwrap();
+            let mut msg = serde_json::to_string(req).unwrap();
+            msg.push('\n');
+            stream.write_all(msg.as_bytes()).await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+
+        let hire_resp = send(
+            &socket_path,
+            &Request::Hire {
+                harness_id: "claude-code".into(),
+                project_path: "/tmp".into(),
+                role: Some("Architect".into()),
+                brief: None,
+            },
+        )
+        .await;
+        let session_id = match hire_resp {
+            Response::Ok { result: ResponseBody::Session(session) } => session.id,
+            other => panic!("expected Ok(Session(..)), got {other:?}"),
+        };
+
+        // Give tmux a moment to actually spawn the shell/command before capturing —
+        // an empty pane immediately after `new-session -d` is still a valid capture,
+        // but this makes the test meaningfully exercise the passthrough end-to-end.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let snapshot_resp =
+            send(&socket_path, &Request::GetPaneSnapshot { session_id: session_id.clone() }).await;
+        match snapshot_resp {
+            Response::Ok { result: ResponseBody::PaneSnapshot(text) } => {
+                // tmux pads captured panes to the terminal's dimensions, so even a
+                // blank shell prompt produces multiple lines of content.
+                assert!(!text.is_empty(), "expected non-empty pane snapshot text");
+            }
+            other => panic!("expected Ok(PaneSnapshot(..)), got {other:?}"),
+        }
+
+        let unknown_snapshot =
+            send(&socket_path, &Request::GetPaneSnapshot { session_id: "does-not-exist".into() }).await;
+        assert!(matches!(unknown_snapshot, Response::Err { .. }));
+
+        // Clean up: release the session so no `reins-*` tmux session is left behind.
+        let release_resp = send(&socket_path, &Request::Release { session_id: session_id.clone() }).await;
+        assert!(matches!(release_resp, Response::Ok { result: ResponseBody::Empty }));
 
         let _ = std::fs::remove_file(&socket_path);
     }

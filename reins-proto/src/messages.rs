@@ -14,6 +14,11 @@ pub enum Request {
     Interrupt { session_id: String },
     ListSessions { project_path: Option<String> },
     ListHarnesses,
+    /// Requests the most recent captured tmux pane text for a session. This is an
+    /// on-demand, polling-based passthrough for MVP: the daemon captures the pane
+    /// fresh on each request rather than maintaining a background poller. A future
+    /// streaming upgrade (a persistent per-session byte stream) would replace this.
+    GetPaneSnapshot { session_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +34,9 @@ pub enum ResponseBody {
     Session(Session),
     Sessions(Vec<Session>),
     Harnesses(Vec<HarnessProfile>),
+    /// Raw tmux pane text captured for a `GetPaneSnapshot` request. Not VT100-interpreted
+    /// (no color/cursor handling) — the TUI renders it as plain text.
+    PaneSnapshot(String),
     Empty,
 }
 
