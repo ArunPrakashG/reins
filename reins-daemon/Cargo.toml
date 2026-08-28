@@ -17,3 +17,6 @@ anyhow.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true
 vt100 = "0.15"
+
+[dev-dependencies]
+reins-store = { path = "../reins-store", features = ["test-support"] }

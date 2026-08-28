@@ -116,6 +116,20 @@ impl ConversationStore for SqliteStore {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl SqliteStore {
+    pub fn conn_for_test_insert_project(&self, id: &str) {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO projects (id, path, name, created_at) VALUES (?1, ?2, ?3, 0)",
+                rusqlite::params![id, format!("/tmp/{id}"), id],
+            )
+            .unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
