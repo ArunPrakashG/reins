@@ -53,16 +53,12 @@ impl HarnessAdapter for ClaudeCodeAdapter {
 
     fn log_dir(&self, ctx: &SpawnContext) -> PathBuf {
         let encoded = ctx.project_path.to_string_lossy().replace('/', "-");
-        dirs_home().join(".claude").join("projects").join(encoded)
+        crate::home_dir().join(".claude").join("projects").join(encoded)
     }
 
     fn parse_log(&self, path: &Path) -> Vec<ConversationTurn> {
         parse_claude_code_jsonl(path)
     }
-}
-
-fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
 }
 
 fn parse_claude_code_jsonl(path: &Path) -> Vec<ConversationTurn> {

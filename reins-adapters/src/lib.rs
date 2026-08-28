@@ -27,3 +27,7 @@ pub trait HarnessAdapter: Send + Sync {
     fn log_dir(&self, ctx: &SpawnContext) -> PathBuf;
     fn parse_log(&self, path: &Path) -> Vec<ConversationTurn>;
 }
+
+pub(crate) fn home_dir() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+}
