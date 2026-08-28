@@ -1,7 +1,9 @@
 mod claude_code;
+mod codex;
 mod registry;
 
 pub use claude_code::ClaudeCodeAdapterFactory;
+pub use codex::CodexAdapterFactory;
 pub use registry::{AdapterFactory, AdapterRegistry, RegistryError};
 
 use reins_core::{ConversationTurn, HarnessProfile, HarnessStatus};

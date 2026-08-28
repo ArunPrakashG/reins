@@ -1,0 +1,3 @@
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"text","text":"Add OAuth login"}]},"timestamp":1735300000}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"I'll start by reading the auth module."}]},"timestamp":1735300005}
+{"type":"event_msg","event":"token_count","payload":{"input_tokens":123,"output_tokens":45}}
