@@ -3,6 +3,10 @@ name = "reins-daemon"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "reins_daemon"
+path = "src/lib.rs"
+
 [[bin]]
 name = "reinsd"
 path = "src/main.rs"

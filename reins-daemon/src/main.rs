@@ -1,9 +1,6 @@
-mod rpc_server;
-mod session_manager;
-mod tmux;
-
 use anyhow::Context;
 use reins_core::HarnessProfile;
+use reins_daemon::{rpc_server, session_manager, tmux};
 
 /// Harness profile TOML files, embedded into the binary at build time so the daemon
 /// ships with them regardless of deployment layout (no need to locate a profiles/
