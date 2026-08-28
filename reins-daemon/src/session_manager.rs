@@ -15,6 +15,10 @@ pub enum SessionManagerError {
     Store(#[from] reins_store::StoreError),
     #[error("no session found with id '{0}'")]
     SessionNotFound(String),
+    #[error("no profile registered for harness id '{0}'")]
+    UnknownProfile(String),
+    #[error("session '{0}' is no longer running in tmux")]
+    SessionGone(String),
 }
 
 pub struct SessionManager {
@@ -87,13 +91,51 @@ impl SessionManager {
         Ok(self.tmux.capture_pane(tmux_session_name)?)
     }
 
-    /// Finds a single session by its id.
+    /// Finds a single session by its id, via an indexed primary-key lookup in the store
+    /// (this is on the hot path: the TUI polls `GetPaneSnapshot` every 250ms per client,
+    /// and every Release/Interrupt goes through here too).
     pub fn find_session(&self, session_id: &str) -> Result<Session, SessionManagerError> {
         self.store
-            .list_sessions(None)?
-            .into_iter()
-            .find(|s| s.id == session_id)
+            .get_session(session_id)?
             .ok_or_else(|| SessionManagerError::SessionNotFound(session_id.to_string()))
+    }
+
+    /// Whether the session's backing tmux session still exists.
+    pub fn session_alive(&self, tmux_session_name: &str) -> bool {
+        self.tmux.session_exists(tmux_session_name)
+    }
+
+    /// Records a new status for a session, but only when it actually differs from
+    /// `current` — avoiding a store write on every poll tick.
+    pub fn sync_status(
+        &self,
+        session_id: &str,
+        current: SessionStatus,
+        new_status: SessionStatus,
+    ) -> Result<(), SessionManagerError> {
+        if current != new_status {
+            self.store.update_status(session_id, new_status)?;
+        }
+        Ok(())
+    }
+
+    /// Startup reconciliation: tmux sessions outlive the daemon, but a daemon restart
+    /// used to leave the roster claiming sessions were alive when their tmux session had
+    /// gone away in the meantime. Marks every not-already-terminal session whose tmux
+    /// session no longer exists as [`SessionStatus::Exited`]. Returns how many rows were
+    /// updated.
+    pub fn reconcile_with_tmux(&self) -> Result<usize, SessionManagerError> {
+        let mut reconciled = 0;
+        for session in self.store.list_sessions(None)? {
+            if matches!(session.status, SessionStatus::Exited | SessionStatus::Killed) {
+                continue;
+            }
+            if !self.tmux.session_exists(&session.tmux_session_name) {
+                self.store.update_status(&session.id, SessionStatus::Exited)?;
+                reconciled += 1;
+            }
+        }
+        Ok(reconciled)
     }
 
     /// Builds a harness adapter instance for the given harness id + profile, via the
@@ -159,6 +201,54 @@ mod tests {
 
     fn tmux_available() -> bool {
         std::process::Command::new("tmux").arg("-V").output().is_ok()
+    }
+
+    #[test]
+    fn reconcile_marks_sessions_without_a_tmux_session_as_exited() {
+        if !tmux_available() {
+            eprintln!("skipping: tmux not installed");
+            return;
+        }
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        store.conn_for_test_insert_project("p1");
+        // A session recorded as live whose tmux session does not exist — exactly the
+        // state a daemon restart leaves behind when the harness died while it was down.
+        let stale = Session {
+            id: "stale".into(),
+            project_id: "p1".into(),
+            harness_id: "fake".into(),
+            role: None,
+            tmux_session_name: "reins-definitely-not-a-real-tmux-session".into(),
+            status: SessionStatus::Running,
+            log_file_path: None,
+            started_at: 0,
+            ended_at: None,
+        };
+        // An already-terminal row must be left untouched (no wasted write, no churn).
+        let killed = Session {
+            id: "killed".into(),
+            status: SessionStatus::Killed,
+            ..stale.clone()
+        };
+        store.insert_session(&stale).unwrap();
+        store.insert_session(&killed).unwrap();
+
+        let manager = SessionManager::new(AdapterRegistry::new(), TmuxController, store.clone());
+        assert_eq!(manager.reconcile_with_tmux().unwrap(), 1);
+
+        assert_eq!(store.get_session("stale").unwrap().unwrap().status, SessionStatus::Exited);
+        assert_eq!(store.get_session("killed").unwrap().unwrap().status, SessionStatus::Killed);
+
+        // Idempotent: a second pass has nothing left to reconcile.
+        assert_eq!(manager.reconcile_with_tmux().unwrap(), 0);
+    }
+
+    #[test]
+    fn find_session_reports_not_found_for_an_unknown_id() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let manager = SessionManager::new(AdapterRegistry::new(), TmuxController, store);
+        let err = manager.find_session("nope").unwrap_err();
+        assert!(matches!(err, SessionManagerError::SessionNotFound(ref id) if id == "nope"));
     }
 
     #[test]

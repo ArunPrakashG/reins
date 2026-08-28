@@ -1,5 +1,8 @@
 use crate::session_manager::SessionManager;
-use reins_core::{CapabilityRouter, HarnessProfile, ManualRouter, TaskDescription};
+use reins_adapters::TerminalSnapshot;
+use reins_core::{
+    CapabilityRouter, HarnessProfile, HarnessStatus, ManualRouter, SessionStatus, TaskDescription,
+};
 use reins_proto::{Request, Response, ResponseBody};
 use std::path::Path;
 use std::sync::Arc;
@@ -21,6 +24,16 @@ pub async fn run_control_server(
 ) -> std::io::Result<()> {
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
+    // Defence in depth: the socket's directory is already private (0700, see
+    // `reins_proto::paths::control_socket_path`), but the socket file itself is created
+    // subject to the process umask, so narrow it explicitly. On Linux, connect(2) checks
+    // write permission on the socket inode, so 0600 restricts control-plane access —
+    // which can spawn harness processes as the daemon's owner — to that owner.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+    }
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(pair) => pair,
@@ -39,6 +52,50 @@ fn resolve_project_id(project_path: &str) -> String {
     std::fs::canonicalize(project_path)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| project_path.to_string())
+}
+
+/// Maps a harness-reported [`HarnessStatus`] onto the roster's [`SessionStatus`].
+///
+/// `HarnessStatus::Error` returns `None`: there is no `SessionStatus::Error` variant,
+/// and inventing one (or forcing the session into some unrelated existing variant)
+/// would misreport it — so an erroring harness simply leaves the stored status alone.
+fn session_status_for(status: HarnessStatus) -> Option<SessionStatus> {
+    match status {
+        HarnessStatus::Idle | HarnessStatus::AwaitingInput => Some(SessionStatus::AwaitingInput),
+        HarnessStatus::Running => Some(SessionStatus::Running),
+        HarnessStatus::Error => None,
+    }
+}
+
+/// Captures the session's tmux pane and, along the way, refreshes the roster's idea of
+/// the session's status — this is the only place in the daemon that runs an adapter's
+/// `detect_status`, and the reason a session ever moves past `Starting`.
+///
+/// If the tmux session has disappeared, the roster row is marked `Exited` and the
+/// capture reports that rather than surfacing a raw tmux failure.
+fn capture_pane_and_sync_status(
+    manager: &SessionManager,
+    profiles: &[HarnessProfile],
+    session: &reins_core::Session,
+) -> Result<String, crate::session_manager::SessionManagerError> {
+    if !manager.session_alive(&session.tmux_session_name) {
+        manager.sync_status(&session.id, session.status, SessionStatus::Exited)?;
+        return Err(crate::session_manager::SessionManagerError::SessionGone(session.id.clone()));
+    }
+
+    let text = manager.capture_pane(&session.tmux_session_name)?;
+
+    // Status detection is best-effort with respect to profile availability: a pane
+    // snapshot is still useful even if no profile is registered for this harness id.
+    if let Some(profile) = profiles.iter().find(|p| p.id == session.harness_id).cloned() {
+        let adapter = manager.adapter_for(&session.harness_id, profile)?;
+        let detected = adapter.detect_status(&TerminalSnapshot { text: text.clone() });
+        if let Some(new_status) = session_status_for(detected) {
+            manager.sync_status(&session.id, session.status, new_status)?;
+        }
+    }
+
+    Ok(text)
 }
 
 async fn handle_connection(
@@ -104,10 +161,9 @@ fn handle_request(
                     .find(|p| p.id == session.harness_id)
                     .cloned()
                     .ok_or_else(|| {
-                        crate::session_manager::SessionManagerError::SessionNotFound(format!(
-                            "no profile registered for harness id '{}'",
-                            session.harness_id
-                        ))
+                        crate::session_manager::SessionManagerError::UnknownProfile(
+                            session.harness_id.clone(),
+                        )
                     })?;
                 let adapter = manager.adapter_for(&session.harness_id, profile)?;
                 manager.interrupt(&session.tmux_session_name, adapter.interrupt_keys())
@@ -144,7 +200,7 @@ fn handle_request(
             // per-session byte stream) would replace this on-demand capture.
             let result = manager
                 .find_session(&session_id)
-                .and_then(|session| manager.capture_pane(&session.tmux_session_name));
+                .and_then(|session| capture_pane_and_sync_status(manager, profiles, &session));
             match result {
                 Ok(text) => Response::Ok { result: ResponseBody::PaneSnapshot(text) },
                 Err(e) => Response::Err { message: e.to_string() },
@@ -169,6 +225,30 @@ mod tests {
             constraints: vec![],
             notes: String::new(),
         }])
+    }
+
+    #[test]
+    fn harness_status_maps_onto_session_status() {
+        assert_eq!(
+            session_status_for(HarnessStatus::Running),
+            Some(SessionStatus::Running)
+        );
+        assert_eq!(
+            session_status_for(HarnessStatus::Idle),
+            Some(SessionStatus::AwaitingInput)
+        );
+        assert_eq!(
+            session_status_for(HarnessStatus::AwaitingInput),
+            Some(SessionStatus::AwaitingInput)
+        );
+        // No SessionStatus::Error exists — an erroring harness leaves the roster alone.
+        assert_eq!(session_status_for(HarnessStatus::Error), None);
+    }
+
+    #[test]
+    fn unknown_profile_error_renders_a_readable_message() {
+        let err = crate::session_manager::SessionManagerError::UnknownProfile("codex".into());
+        assert_eq!(err.to_string(), "no profile registered for harness id 'codex'");
     }
 
     #[tokio::test]
@@ -332,6 +412,25 @@ mod tests {
                 assert!(!text.is_empty(), "expected non-empty pane snapshot text");
             }
             other => panic!("expected Ok(PaneSnapshot(..)), got {other:?}"),
+        }
+
+        // The snapshot handler is also what drives status detection: the session must
+        // have moved off `Starting` once a pane has been captured and handed to the
+        // adapter's `detect_status`.
+        let list_resp = send(&socket_path, &Request::ListSessions { project_path: None }).await;
+        match list_resp {
+            Response::Ok { result: ResponseBody::Sessions(sessions) } => {
+                let session = sessions
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .expect("hired session should be listed");
+                assert_ne!(
+                    session.status,
+                    reins_core::SessionStatus::Starting,
+                    "GetPaneSnapshot should have refreshed the session's status"
+                );
+            }
+            other => panic!("expected Ok(Sessions(..)), got {other:?}"),
         }
 
         let unknown_snapshot =

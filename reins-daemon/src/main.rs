@@ -23,11 +23,33 @@ fn load_profiles() -> anyhow::Result<Vec<HarnessProfile>> {
     .collect()
 }
 
+/// Resolves the on-disk location of the session database:
+/// `$XDG_DATA_HOME/reins/reins.db`, falling back to `~/.local/share/reins/reins.db`.
+/// Creates the parent directory if it doesn't exist.
+fn store_path() -> anyhow::Result<std::path::PathBuf> {
+    let base = match std::env::var_os("XDG_DATA_HOME") {
+        Some(dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
+        _ => {
+            let home = std::env::var_os("HOME").ok_or_else(|| {
+                anyhow::anyhow!("neither XDG_DATA_HOME nor HOME is set; cannot locate a data directory")
+            })?;
+            std::path::PathBuf::from(home).join(".local/share")
+        }
+    };
+    let dir = base.join("reins");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating data directory {}", dir.display()))?;
+    Ok(dir.join("reins.db"))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let socket_path = std::env::temp_dir().join("reinsd.sock");
+    let socket_path =
+        reins_proto::control_socket_path().context("resolving the control socket path")?;
+    let db_path = store_path().context("resolving the session store path")?;
     let store = std::sync::Arc::new(
-        reins_store::SqliteStore::open_in_memory().context("opening in-memory session store")?,
+        reins_store::SqliteStore::open(&db_path)
+            .with_context(|| format!("opening session store at {}", db_path.display()))?,
     );
     let mut registry = reins_adapters::AdapterRegistry::new();
     registry.register(Box::new(reins_adapters::ClaudeCodeAdapterFactory));
@@ -40,6 +62,17 @@ async fn main() -> anyhow::Result<()> {
     ));
     let profiles = std::sync::Arc::new(load_profiles().context("loading harness profiles")?);
 
+    // The roster now persists across restarts, but tmux sessions can die while the
+    // daemon is down — reconcile before serving so we never report a dead session as
+    // live.
+    let reconciled = manager
+        .reconcile_with_tmux()
+        .context("reconciling stored sessions against tmux at startup")?;
+    if reconciled > 0 {
+        println!("reinsd: marked {reconciled} stale session(s) as exited");
+    }
+
+    println!("reinsd store: {}", db_path.display());
     println!("reinsd starting on {}", socket_path.display());
     rpc_server::run_control_server(&socket_path, manager, profiles)
         .await
