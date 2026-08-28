@@ -42,6 +42,22 @@ fn store_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(dir.join("reins.db"))
 }
 
+/// Restricts the roster database to the owning user. It holds session metadata only
+/// (project paths, roles, tmux session names — never conversation content), but that is
+/// still nobody else's business on a shared host, and the data directory itself is
+/// conventionally world-readable.
+#[cfg(unix)]
+fn restrict_store_permissions(path: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("restricting permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn restrict_store_permissions(_path: &std::path::Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let socket_path =
@@ -51,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
         reins_store::SqliteStore::open(&db_path)
             .with_context(|| format!("opening session store at {}", db_path.display()))?,
     );
+    restrict_store_permissions(&db_path)?;
     let mut registry = reins_adapters::AdapterRegistry::new();
     registry.register(Box::new(reins_adapters::ClaudeCodeAdapterFactory));
     registry.register(Box::new(reins_adapters::CodexAdapterFactory));
