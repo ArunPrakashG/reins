@@ -46,8 +46,8 @@ impl TmuxController {
     pub fn session_exists(&self, name: &str) -> bool {
         Command::new("tmux")
             .args(["has-session", "-t", name])
-            .status()
-            .map(|s| s.success())
+            .output()
+            .map(|o| o.status.success())
             .unwrap_or(false)
     }
 
