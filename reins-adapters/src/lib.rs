@@ -1,9 +1,11 @@
 mod claude_code;
 mod codex;
+mod gemini_cli;
 mod registry;
 
 pub use claude_code::ClaudeCodeAdapterFactory;
 pub use codex::CodexAdapterFactory;
+pub use gemini_cli::GeminiCliAdapterFactory;
 pub use registry::{AdapterFactory, AdapterRegistry, RegistryError};
 
 use reins_core::{ConversationTurn, HarnessProfile, HarnessStatus};

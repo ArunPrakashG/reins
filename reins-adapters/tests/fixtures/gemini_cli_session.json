@@ -1,0 +1,5 @@
+[
+  {"role": "user", "parts": [{"text": "Add OAuth login"}]},
+  {"role": "model", "parts": [{"text": "I'll start by reading the auth module."}]},
+  {"role": "model", "parts": [{"text": "Calling read_file on auth.py"}, {"functionCall": {"name": "read_file", "args": {"path": "auth.py"}}}]}
+]

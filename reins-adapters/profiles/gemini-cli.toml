@@ -1,0 +1,5 @@
+id = "gemini-cli"
+display_name = "Gemini CLI"
+strengths = ["research", "multimodal", "exploration"]
+constraints = []
+notes = "Best for research and multimodal exploration tasks."
