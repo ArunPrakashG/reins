@@ -1,5 +1,5 @@
 use crate::session_manager::SessionManager;
-use reins_core::HarnessProfile;
+use reins_core::{CapabilityRouter, HarnessProfile, ManualRouter, TaskDescription};
 use reins_proto::{Request, Response, ResponseBody};
 use std::path::Path;
 use std::sync::Arc;
@@ -124,8 +124,16 @@ fn handle_request(
                 Err(e) => Response::Err { message: e.to_string() },
             }
         }
-        Request::ListHarnesses => Response::Ok {
-            result: ResponseBody::Harnesses(profiles.to_vec()),
+        Request::ListHarnesses => {
+            let router = ManualRouter;
+            let suggestions = router.suggest(&TaskDescription(String::new()), profiles);
+            let harnesses = suggestions
+                .into_iter()
+                .map(|suggestion| suggestion.profile)
+                .collect();
+            Response::Ok {
+                result: ResponseBody::Harnesses(harnesses),
+            }
         },
     }
 }
