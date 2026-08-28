@@ -84,7 +84,10 @@ fn uuid_v4() -> String {
     // Minimal dependency-free v4-ish id: good enough as a tmux session
     // suffix and store primary key. Not cryptographically strong.
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     format!("{nanos:x}")
 }
 
