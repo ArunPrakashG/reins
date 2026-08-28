@@ -3,6 +3,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
+use reins_core::SessionStatus;
+
 use crate::app::{App, InputMode};
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -23,11 +25,34 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_status_line(frame, app, rows[1]);
 }
 
+/// Roster status glyph, matching the spec's §9 mockup: a filled dot for a team member
+/// who is still on the job, a hollow one for a released or exited member.
+fn status_glyph(status: SessionStatus) -> &'static str {
+    match status {
+        SessionStatus::Starting | SessionStatus::Running | SessionStatus::AwaitingInput => "●",
+        SessionStatus::Exited | SessionStatus::Killed => "○",
+    }
+}
+
 fn draw_roster(frame: &mut Frame, app: &App, area: Rect) {
+    // Released/exited members stay in the roster (they're still part of the project's
+    // history, and the daemon still returns them) but are visually demoted rather than
+    // filtered out: filtering would desynchronise the list indices from `app.selected`,
+    // which every action — release, interrupt, pane polling — keys off. A glyph plus
+    // dimming is the smaller, safer distinction.
     let items: Vec<ListItem> = app
         .sessions
         .iter()
-        .map(|session| ListItem::new(session.display_label()))
+        .map(|session| {
+            let text = format!("{} {}", status_glyph(session.status), session.display_label());
+            let item = ListItem::new(text);
+            match session.status {
+                SessionStatus::Exited | SessionStatus::Killed => {
+                    item.style(Style::default().add_modifier(Modifier::DIM))
+                }
+                _ => item,
+            }
+        })
         .collect();
 
     let list = List::new(items)
@@ -63,12 +88,33 @@ fn draw_status_line(frame: &mut Frame, app: &App, area: Rect) {
             format!("hire> harness id: {}_  (Enter to continue, Esc to cancel)", app.input_harness_id)
         }
         Some(InputMode::Role) => format!(
-            "hire> harness id: {}  role: {}_  (Enter to hire, Esc to cancel)",
+            "hire> harness id: {}  role: {}_  (Enter to continue, Esc to cancel)",
             app.input_harness_id, app.input_role
         ),
-        None => {
-            "q: quit  up/down: select  h: hire  r: release  i: interrupt".to_string()
-        }
+        Some(InputMode::Brief) => format!(
+            "hire> harness id: {}  role: {}  brief (optional): {}_  (Enter to hire, Esc to cancel)",
+            app.input_harness_id, app.input_role, app.input_brief
+        ),
+        // In-loop errors surface here rather than on stderr, which would corrupt the
+        // raw-mode frame.
+        None => match &app.status_message {
+            Some(message) => format!("{message}  (any key to dismiss)"),
+            None => "q: quit  up/down: select  h: hire  r: release  i: interrupt".to_string(),
+        },
     };
     frame.render_widget(Paragraph::new(text), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_glyph_distinguishes_live_from_finished_members() {
+        assert_eq!(status_glyph(SessionStatus::Starting), "●");
+        assert_eq!(status_glyph(SessionStatus::Running), "●");
+        assert_eq!(status_glyph(SessionStatus::AwaitingInput), "●");
+        assert_eq!(status_glyph(SessionStatus::Exited), "○");
+        assert_eq!(status_glyph(SessionStatus::Killed), "○");
+    }
 }

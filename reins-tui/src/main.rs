@@ -24,11 +24,19 @@ async fn main() {
 }
 
 async fn run() -> anyhow::Result<()> {
-    let socket_path = std::env::temp_dir().join("reinsd.sock");
+    // Same resolution rules as the daemon (see reins_proto::paths) so both ends agree
+    // on a private, non-world-writable socket location.
+    let socket_path = reins_proto::control_socket_path()?;
     let rpc = RpcClient::new(socket_path);
 
     let mut app = App::new();
     refresh_sessions(&rpc, &mut app).await;
+    // The initial refresh happens before the terminal is put into raw mode, so a
+    // failure here can still be reported the ordinary way on stderr. Every later
+    // refresh leaves the message in `app.status_message` for the status line instead.
+    if let Some(message) = app.status_message.take() {
+        eprintln!("reins: {message}");
+    }
 
     let mut terminal = init_terminal()?;
     let result = event_loop(&mut terminal, &mut app, &rpc).await;
@@ -77,10 +85,10 @@ async fn refresh_sessions(rpc: &RpcClient, app: &mut App) {
             // Unexpected but non-fatal: leave the roster as-is.
         }
         Ok(Response::Err { message }) => {
-            eprintln!("reins: daemon returned an error: {message}");
+            app.set_status_message(format!("daemon returned an error: {message}"));
         }
         Err(err) => {
-            eprintln!("reins: could not reach reinsd (is it running?): {err:#}");
+            app.set_status_message(format!("could not reach reinsd (is it running?): {err:#}"));
         }
     }
 }
@@ -115,6 +123,9 @@ async fn event_loop(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                // Any keypress dismisses a stale status message; the handlers below
+                // then set a fresh one if this action fails too.
+                app.clear_status_message();
                 if app.input_mode.is_some() {
                     handle_input_mode_key(key.code, app, rpc).await;
                 } else if key.code == KeyCode::Char('q') {
@@ -130,25 +141,38 @@ async fn event_loop(
     Ok(())
 }
 
-/// Handles a keypress while the two-step inline hire prompt is active.
+/// Optional text fields in the hire prompt: an empty buffer means "not supplied".
+fn none_if_empty(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// Handles a keypress while the inline hire prompt is active.
 async fn handle_input_mode_key(code: KeyCode, app: &mut App, rpc: &RpcClient) {
     match code {
         KeyCode::Esc => app.cancel_input(),
         KeyCode::Backspace => app.backspace(),
         KeyCode::Char(c) => app.push_char(c),
         KeyCode::Enter => {
-            if let Some((harness_id, role)) = app.advance_input() {
+            if let Some(input) = app.advance_input() {
                 let project_path = std::env::current_dir()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|_| ".".to_string());
                 let req = Request::Hire {
-                    harness_id,
+                    harness_id: input.harness_id,
                     project_path,
-                    role: if role.is_empty() { None } else { Some(role) },
-                    brief: None,
+                    role: none_if_empty(input.role),
+                    brief: none_if_empty(input.brief),
                 };
-                if let Ok(Response::Err { message }) = rpc.send(req).await {
-                    eprintln!("reins: hire failed: {message}");
+                match rpc.send(req).await {
+                    Ok(Response::Err { message }) => {
+                        app.set_status_message(format!("hire failed: {message}"))
+                    }
+                    Err(err) => app.set_status_message(format!("hire failed: {err:#}")),
+                    Ok(Response::Ok { .. }) => {}
                 }
                 refresh_sessions(rpc, app).await;
             }
@@ -165,16 +189,31 @@ async fn handle_normal_mode_key(code: KeyCode, app: &mut App, rpc: &RpcClient) {
         KeyCode::Char('h') => app.start_hire_input(),
         KeyCode::Char('r') => {
             if let Some(session_id) = app.selected_session().map(|s| s.id.clone()) {
-                let _ = rpc.send(Request::Release { session_id }).await;
+                let response = rpc.send(Request::Release { session_id }).await;
+                report_action_result(app, "release", response);
                 refresh_sessions(rpc, app).await;
             }
         }
         KeyCode::Char('i') => {
             if let Some(session_id) = app.selected_session().map(|s| s.id.clone()) {
-                let _ = rpc.send(Request::Interrupt { session_id }).await;
+                let response = rpc.send(Request::Interrupt { session_id }).await;
+                report_action_result(app, "interrupt", response);
                 refresh_sessions(rpc, app).await;
             }
         }
         _ => {}
+    }
+}
+
+/// Surfaces a failed roster action in the status line. Nothing is printed to stderr:
+/// the terminal is in raw mode on the alternate screen, so stderr writes would corrupt
+/// the rendered frame.
+fn report_action_result(app: &mut App, action: &str, response: anyhow::Result<Response>) {
+    match response {
+        Ok(Response::Err { message }) => {
+            app.set_status_message(format!("{action} failed: {message}"))
+        }
+        Err(err) => app.set_status_message(format!("{action} failed: {err:#}")),
+        Ok(Response::Ok { .. }) => {}
     }
 }

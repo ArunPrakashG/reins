@@ -31,6 +31,18 @@ reins
 list available harnesses, hire/release/interrupt team members, and
 view their live tmux panes.
 
+Both binaries resolve the same paths:
+
+| What | Location |
+|---|---|
+| Control socket | `$XDG_RUNTIME_DIR/reins/reinsd.sock`, else `~/.local/state/reins/reinsd.sock` (directory forced to mode 0700, socket to 0600) |
+| Roster database | `$XDG_DATA_HOME/reins/reins.db`, else `~/.local/share/reins/reins.db` |
+
+The roster database stores session **metadata only** — never
+conversation content. Because it persists across restarts while tmux
+sessions may not, `reinsd` reconciles the stored roster against tmux at
+startup and marks vanished sessions as exited.
+
 ## Design
 
 See [`docs/superpowers/specs/2026-08-28-reins-design.md`](docs/superpowers/specs/2026-08-28-reins-design.md)

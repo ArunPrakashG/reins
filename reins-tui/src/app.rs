@@ -5,17 +5,33 @@ use reins_core::Session;
 pub enum InputMode {
     HarnessId,
     Role,
+    /// The optional opening brief handed to the new team member. Enter on an empty
+    /// buffer hires without one.
+    Brief,
+}
+
+/// The fields collected by the inline hire prompt, returned once it completes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HireInput {
+    pub harness_id: String,
+    pub role: String,
+    pub brief: String,
 }
 
 pub struct App {
     pub sessions: Vec<Session>,
     pub selected: usize,
-    /// `Some(_)` while the two-step inline hire prompt is active; `None` otherwise.
+    /// `Some(_)` while the three-step inline hire prompt is active; `None` otherwise.
     pub input_mode: Option<InputMode>,
     pub input_harness_id: String,
     pub input_role: String,
+    pub input_brief: String,
     /// Most recently fetched raw tmux pane text for the selected session.
     pub pane_content: String,
+    /// Last error/notice to show in the status line. The TUI holds the terminal in
+    /// raw mode on the alternate screen, so anything printed to stderr would corrupt
+    /// the rendered frame — in-loop messages go here and are drawn by `ui::draw`.
+    pub status_message: Option<String>,
 }
 
 impl App {
@@ -26,8 +42,20 @@ impl App {
             input_mode: None,
             input_harness_id: String::new(),
             input_role: String::new(),
+            input_brief: String::new(),
             pane_content: String::new(),
+            status_message: None,
         }
+    }
+
+    /// Records a message for the status line (replacing any previous one).
+    pub fn set_status_message(&mut self, message: impl Into<String>) {
+        self.status_message = Some(message.into());
+    }
+
+    /// Clears the status line back to the default key hints.
+    pub fn clear_status_message(&mut self) {
+        self.status_message = None;
     }
 
     pub fn select_next(&mut self) {
@@ -46,18 +74,22 @@ impl App {
         self.sessions.get(self.selected)
     }
 
-    /// Begins the two-step inline hire prompt, starting on the harness id field.
+    /// Begins the three-step inline hire prompt, starting on the harness id field.
     pub fn start_hire_input(&mut self) {
         self.input_mode = Some(InputMode::HarnessId);
-        self.input_harness_id.clear();
-        self.input_role.clear();
+        self.clear_input_fields();
     }
 
     /// Abandons the inline hire prompt without sending anything.
     pub fn cancel_input(&mut self) {
         self.input_mode = None;
+        self.clear_input_fields();
+    }
+
+    fn clear_input_fields(&mut self) {
         self.input_harness_id.clear();
         self.input_role.clear();
+        self.input_brief.clear();
     }
 
     /// Appends a character to whichever field of the hire prompt is active. No-op if
@@ -66,6 +98,7 @@ impl App {
         match self.input_mode {
             Some(InputMode::HarnessId) => self.input_harness_id.push(c),
             Some(InputMode::Role) => self.input_role.push(c),
+            Some(InputMode::Brief) => self.input_brief.push(c),
             None => {}
         }
     }
@@ -80,27 +113,37 @@ impl App {
             Some(InputMode::Role) => {
                 self.input_role.pop();
             }
+            Some(InputMode::Brief) => {
+                self.input_brief.pop();
+            }
             None => {}
         }
     }
 
-    /// Advances the hire prompt on Enter. From the harness id field, moves to the role
-    /// field and returns `None`. From the role field, finishes the prompt (resetting
-    /// `input_mode` to `None`) and returns the collected `(harness_id, role)` pair. If
-    /// the prompt wasn't active, returns `None` and does nothing.
-    pub fn advance_input(&mut self) -> Option<(String, String)> {
+    /// Advances the hire prompt on Enter: harness id → role → brief. Returns `None`
+    /// while more fields remain. Enter on the brief field (empty or not — the brief is
+    /// optional) finishes the prompt, resetting `input_mode` to `None` and returning the
+    /// collected [`HireInput`]. If the prompt wasn't active, returns `None` and does
+    /// nothing.
+    pub fn advance_input(&mut self) -> Option<HireInput> {
         match self.input_mode {
             Some(InputMode::HarnessId) => {
                 self.input_mode = Some(InputMode::Role);
                 None
             }
             Some(InputMode::Role) => {
-                let harness_id = self.input_harness_id.clone();
-                let role = self.input_role.clone();
+                self.input_mode = Some(InputMode::Brief);
+                None
+            }
+            Some(InputMode::Brief) => {
+                let collected = HireInput {
+                    harness_id: self.input_harness_id.clone(),
+                    role: self.input_role.clone(),
+                    brief: self.input_brief.clone(),
+                };
                 self.input_mode = None;
-                self.input_harness_id.clear();
-                self.input_role.clear();
-                Some((harness_id, role))
+                self.clear_input_fields();
+                Some(collected)
             }
             None => None,
         }
@@ -137,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn hire_input_collects_two_fields_and_resets() {
+    fn hire_input_collects_three_fields_and_resets() {
         let mut app = App::new();
         assert_eq!(app.input_mode, None);
 
@@ -158,11 +201,52 @@ mod tests {
         app.push_char('c');
         assert_eq!(app.input_role, "rc");
 
+        // ...and so does Enter on the role field: the brief comes last.
+        assert_eq!(app.advance_input(), None);
+        assert_eq!(app.input_mode, Some(InputMode::Brief));
+
+        app.push_char('h');
+        app.push_char('i');
+        assert_eq!(app.input_brief, "hi");
+
         let result = app.advance_input();
-        assert_eq!(result, Some(("cc".to_string(), "rc".to_string())));
+        assert_eq!(
+            result,
+            Some(HireInput {
+                harness_id: "cc".into(),
+                role: "rc".into(),
+                brief: "hi".into(),
+            })
+        );
         assert_eq!(app.input_mode, None);
         assert_eq!(app.input_harness_id, "");
         assert_eq!(app.input_role, "");
+        assert_eq!(app.input_brief, "");
+    }
+
+    #[test]
+    fn brief_is_optional_and_completes_the_prompt_when_left_empty() {
+        let mut app = App::new();
+        app.start_hire_input();
+        app.push_char('c');
+        app.advance_input();
+        app.advance_input();
+        assert_eq!(app.input_mode, Some(InputMode::Brief));
+
+        let result = app.advance_input().expect("empty brief still completes the prompt");
+        assert_eq!(result.brief, "");
+        assert_eq!(result.harness_id, "c");
+        assert_eq!(app.input_mode, None);
+    }
+
+    #[test]
+    fn status_message_round_trips() {
+        let mut app = App::new();
+        assert_eq!(app.status_message, None);
+        app.set_status_message("hire failed: nope");
+        assert_eq!(app.status_message.as_deref(), Some("hire failed: nope"));
+        app.clear_status_message();
+        assert_eq!(app.status_message, None);
     }
 
     #[test]
