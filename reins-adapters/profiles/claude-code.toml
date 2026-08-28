@@ -1,0 +1,5 @@
+id = "claude-code"
+display_name = "Claude Code"
+strengths = ["architecture", "reasoning", "review", "refactoring"]
+constraints = ["no-multimodal-image-diff"]
+notes = "Best for judgment calls and cross-file reasoning."

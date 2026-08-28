@@ -1,0 +1,3 @@
+{"type":"user","message":{"content":"Add OAuth login"},"timestamp":1735300000}
+{"type":"assistant","message":{"content":"I'll start by reading the auth module."},"timestamp":1735300005}
+{"type":"assistant","message":{"content":"","tool_calls":[{"name":"Read","input":{"file_path":"src/auth.rs"}}]},"timestamp":1735300006}
