@@ -4,4 +4,6 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("session not found: {0}")]
     NotFound(String),
+    #[error("lock poisoned")]
+    Poisoned,
 }

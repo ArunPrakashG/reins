@@ -49,7 +49,7 @@ fn status_from_str(s: &str) -> SessionStatus {
 
 impl ConversationStore for SqliteStore {
     fn insert_session(&self, session: &Session) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
         conn.execute(
             "INSERT INTO sessions (id, project_id, harness_id, role, tmux_session_name, status, log_file_path, started_at, ended_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -69,7 +69,7 @@ impl ConversationStore for SqliteStore {
     }
 
     fn update_status(&self, id: &str, status: SessionStatus) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
         let changed = conn.execute(
             "UPDATE sessions SET status = ?1 WHERE id = ?2",
             rusqlite::params![status_to_str(status), id],
@@ -81,7 +81,7 @@ impl ConversationStore for SqliteStore {
     }
 
     fn list_sessions(&self, project_id: Option<&str>) -> Result<Vec<Session>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
         let mut stmt = if project_id.is_some() {
             conn.prepare(
                 "SELECT id, project_id, harness_id, role, tmux_session_name, status, log_file_path, started_at, ended_at
