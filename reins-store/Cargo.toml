@@ -1,0 +1,9 @@
+[package]
+name = "reins-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+reins-core = { path = "../reins-core" }
+thiserror.workspace = true
+rusqlite = { version = "0.31", features = ["bundled"] }

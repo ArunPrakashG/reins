@@ -1,0 +1,19 @@
+[package]
+name = "reins-daemon"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "reinsd"
+path = "src/main.rs"
+
+[dependencies]
+reins-core = { path = "../reins-core" }
+reins-adapters = { path = "../reins-adapters" }
+reins-store = { path = "../reins-store" }
+reins-proto = { path = "../reins-proto" }
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+vt100 = "0.15"

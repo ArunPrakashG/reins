@@ -1,0 +1,9 @@
+[package]
+name = "reins-proto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+reins-core = { path = "../reins-core" }
+serde.workspace = true
+serde_json.workspace = true

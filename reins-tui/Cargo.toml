@@ -1,0 +1,17 @@
+[package]
+name = "reins-tui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "reins"
+path = "src/main.rs"
+
+[dependencies]
+reins-core = { path = "../reins-core" }
+reins-proto = { path = "../reins-proto" }
+tokio.workspace = true
+anyhow.workspace = true
+ratatui = "0.28"
+crossterm = "0.28"
+vt100 = "0.15"
