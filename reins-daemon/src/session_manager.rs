@@ -1,5 +1,5 @@
 use crate::tmux::TmuxController;
-use reins_adapters::AdapterRegistry;
+use reins_adapters::{AdapterRegistry, HarnessAdapter};
 use reins_core::{Session, SessionStatus};
 use reins_store::ConversationStore;
 use std::path::Path;
@@ -13,6 +13,8 @@ pub enum SessionManagerError {
     Tmux(#[from] crate::tmux::TmuxError),
     #[error("store error: {0}")]
     Store(#[from] reins_store::StoreError),
+    #[error("no session found with id '{0}'")]
+    SessionNotFound(String),
 }
 
 pub struct SessionManager {
@@ -57,6 +59,7 @@ impl SessionManager {
             started_at: now_ts(),
             ended_at: None,
         };
+        self.store.ensure_project(project_id, &project_path.to_string_lossy())?;
         self.store.insert_session(&session)?;
         Ok(session)
     }
@@ -70,6 +73,32 @@ impl SessionManager {
     pub fn interrupt(&self, tmux_session_name: &str, interrupt_keys: &[u8]) -> Result<(), SessionManagerError> {
         self.tmux.send_keys(tmux_session_name, interrupt_keys)?;
         Ok(())
+    }
+
+    /// Lists sessions from the store, optionally filtered by project id.
+    pub fn list_sessions(&self, project_id: Option<&str>) -> Result<Vec<Session>, SessionManagerError> {
+        Ok(self.store.list_sessions(project_id)?)
+    }
+
+    /// Finds a single session by its id.
+    pub fn find_session(&self, session_id: &str) -> Result<Session, SessionManagerError> {
+        self.store
+            .list_sessions(None)?
+            .into_iter()
+            .find(|s| s.id == session_id)
+            .ok_or_else(|| SessionManagerError::SessionNotFound(session_id.to_string()))
+    }
+
+    /// Builds a harness adapter instance for the given harness id + profile, via the
+    /// registered adapter factory. Exposed so callers (e.g. the RPC server) can resolve
+    /// harness-specific behavior (like interrupt key sequences) without needing direct
+    /// access to the registry.
+    pub fn adapter_for(
+        &self,
+        harness_id: &str,
+        profile: reins_core::HarnessProfile,
+    ) -> Result<Box<dyn HarnessAdapter>, SessionManagerError> {
+        Ok(self.registry.build(harness_id, profile)?)
     }
 }
 

@@ -11,6 +11,12 @@ pub trait ConversationStore: Send + Sync {
     fn insert_session(&self, session: &Session) -> Result<(), StoreError>;
     fn update_status(&self, id: &str, status: SessionStatus) -> Result<(), StoreError>;
     fn list_sessions(&self, project_id: Option<&str>) -> Result<Vec<Session>, StoreError>;
+    /// Idempotently ensures a `projects` row exists for `id` (using `path` as both the
+    /// stored path and display name), so that `insert_session`'s foreign key on
+    /// `project_id` is satisfied. Callers that only have a project id/path (not a fully
+    /// registered project) — e.g. the daemon deriving `project_id` from a canonicalized
+    /// path — should call this before `insert_session`. A no-op if the row already exists.
+    fn ensure_project(&self, id: &str, path: &str) -> Result<(), StoreError>;
 }
 
 pub struct SqliteStore {
@@ -113,6 +119,15 @@ impl ConversationStore for SqliteStore {
             stmt.query_map([], map_row)?
         };
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn ensure_project(&self, id: &str, path: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO projects (id, path, name, created_at) VALUES (?1, ?2, ?2, 0)",
+            rusqlite::params![id, path],
+        )?;
+        Ok(())
     }
 }
 
