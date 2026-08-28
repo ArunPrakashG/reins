@@ -11,13 +11,16 @@ use tokio::net::{UnixListener, UnixStream};
 /// `reins_proto::Response` JSON messages. Runs forever (until the process exits or the
 /// task is aborted) — callers that want it to run in the background should
 /// `tokio::spawn` this future themselves.
+///
+/// Returns an error if the control socket cannot be bound (e.g. permission denied,
+/// or the parent directory doesn't exist) instead of panicking the caller's task.
 pub async fn run_control_server(
     socket_path: &Path,
     manager: Arc<SessionManager>,
     profiles: Arc<Vec<HarnessProfile>>,
-) {
+) -> std::io::Result<()> {
     let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path).expect("bind control socket");
+    let listener = UnixListener::bind(socket_path)?;
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(pair) => pair,
@@ -53,7 +56,15 @@ async fn handle_connection(
         Ok(request) => handle_request(request, &manager, &profiles),
         Err(e) => Response::Err { message: e.to_string() },
     };
-    let mut out = serde_json::to_string(&response).unwrap();
+    let mut out = serde_json::to_string(&response).unwrap_or_else(|e| {
+        // Response/ResponseBody are plain derived-serde types over already-serializable
+        // fields, so this should be unreachable in practice; fall back to a hand-built
+        // error line rather than panicking the connection task if it ever isn't.
+        format!(
+            "{{\"status\":\"Err\",\"message\":\"failed to serialize response: {}\"}}",
+            e.to_string().replace('"', "'")
+        )
+    });
     out.push('\n');
     let _ = write_half.write_all(out.as_bytes()).await;
 }
