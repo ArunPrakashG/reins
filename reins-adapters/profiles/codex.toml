@@ -1,5 +1,5 @@
 id = "codex"
-display_name = "Codex"
-strengths = ["execution", "speed", "large-scale codegen"]
-constraints = ["no-multimodal-image-diff"]
-notes = "Best for well-specified implementation work at speed."
+display_name = "Codex CLI"
+strengths = ["implementation", "debugging", "testing"]
+constraints = []
+notes = "Best for well-specified implementation and debugging work."
