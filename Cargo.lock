@@ -805,8 +805,11 @@ dependencies = [
  "proto",
  "ratatui",
  "reins_core",
+ "serde",
  "serde_json",
+ "thiserror",
  "tokio",
+ "toml",
  "vt100",
 ]
 

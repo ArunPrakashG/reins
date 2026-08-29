@@ -1,5 +1,6 @@
 mod app;
 mod client;
+mod config;
 mod ui;
 
 use app::App;
@@ -24,6 +25,17 @@ async fn main() {
 }
 
 async fn run() -> anyhow::Result<()> {
+    // Handle subcommands before launching the TUI
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "config" => {
+                return handle_config_subcommand(&args[2..]);
+            }
+            _ => {}
+        }
+    }
+
     // Same resolution rules as the daemon (see proto::paths) so both ends agree
     // on a private, non-world-writable socket location.
     let socket_path = proto::control_socket_path()?;
@@ -42,6 +54,35 @@ async fn run() -> anyhow::Result<()> {
     let result = event_loop(&mut terminal, &mut app, &rpc).await;
     restore_terminal(&mut terminal)?;
     result
+}
+
+fn handle_config_subcommand(args: &[String]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        // `reins config` — print current config
+        let cfg = config::load();
+        println!("animations = {}", cfg.animations);
+        Ok(())
+    } else if args.len() >= 3 && args[0] == "set" && args[1] == "animations" {
+        // `reins config set animations on|off`
+        let value = match args[2].as_str() {
+            "on" => true,
+            "off" => false,
+            other => {
+                return Err(anyhow::anyhow!(
+                    "invalid animations value: '{}'; must be 'on' or 'off'",
+                    other
+                ));
+            }
+        };
+        let mut cfg = config::load();
+        cfg.animations = value;
+        config::save(&cfg)?;
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "unknown config subcommand; usage: reins config [set animations on|off]"
+        ))
+    }
 }
 
 fn init_terminal() -> anyhow::Result<Terminal<CrosstermBackend<std::io::Stdout>>> {

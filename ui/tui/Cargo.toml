@@ -12,7 +12,10 @@ reins_core = { path = "../../apps/core" }
 proto = { path = "../../packages/proto" }
 tokio.workspace = true
 anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
 ratatui = "0.28"
 crossterm = "0.28"
 vt100 = "0.15"

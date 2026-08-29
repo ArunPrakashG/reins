@@ -2,4 +2,4 @@ mod messages;
 pub mod paths;
 
 pub use messages::{Request, Response, ResponseBody};
-pub use paths::{control_socket_path, systemd_unit_path, launchd_plist_path};
+pub use paths::{config_file_path, control_socket_path, launchd_plist_path, systemd_unit_path};
