@@ -187,9 +187,19 @@ mod tests {
         assert!(report.no_harness_available());
     }
 
+    fn tmux_available() -> bool {
+        std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_ok()
+    }
+
     #[test]
-    #[ignore = "requires tmux to be installed"]
     fn detect_tmux_returns_some_when_tmux_installed() {
+        if !tmux_available() {
+            eprintln!("skipping: tmux not installed");
+            return;
+        }
         let result = detect_tmux();
         assert!(result.is_some());
         if let Some(version) = result {
