@@ -6,6 +6,7 @@
 //! `AdapterRegistry`/`TmuxController`/`SqliteStore` pieces and calls
 //! [`rpc_server::run_control_server`].
 
+pub mod lifecycle;
 pub mod rpc_server;
 pub mod session_manager;
 pub mod tmux;
