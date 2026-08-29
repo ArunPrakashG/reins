@@ -173,6 +173,10 @@ async fn run() -> anyhow::Result<()> {
             "config" => {
                 return handle_config_subcommand(&args[2..]);
             }
+            "setup" => {
+                setup::run_setup(&registry(), &profiles()?);
+                return Ok(());
+            }
             _ => {}
         }
     }

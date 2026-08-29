@@ -19,13 +19,15 @@ pub enum SetupError {
 
 /// Runs the first-run setup wizard: detects tmux/harness availability (step 2-3),
 /// installs and starts the `reinsd` background service for this platform (step 4-5),
-/// and writes the setup-complete marker (step 6).
+/// and writes the setup-complete marker (step 6). Exits on the first hard failure
+/// (tmux missing, no harness available, install/linger error) — this is the
+/// first-run behavior, where a partial setup shouldn't be treated as done.
 ///
-/// This intentionally keeps the "detect + gate on hard failures" prints separate from
-/// the "install" logic below them (rather than interleaving early returns throughout)
-/// so that a future caller — e.g. `reins setup`, which wants to re-detect and re-install
-/// without exiting on the first non-fatal gap — can split this into two passes without
-/// having to untangle print statements from control flow.
+/// The "detect + gate on hard failures" prints stay separate from the "install"
+/// logic (factored into [`install_daemon`]) so `reins setup` — which wants to
+/// re-detect and re-install without exiting on a non-fatal gap like a single
+/// missing harness — can call [`detect::detect`] and [`install_daemon`] itself
+/// instead of duplicating this function's body.
 pub fn run_wizard(
     registry: &adapters::AdapterRegistry,
     profiles: &[reins_core::HarnessProfile],
@@ -44,6 +46,14 @@ pub fn run_wizard(
         return Err(SetupError::NoHarnessAvailable);
     }
 
+    install_daemon()
+}
+
+/// Installs and starts the `reinsd` background service for this platform (step 4-5),
+/// and writes the setup-complete marker (step 6). Split out of [`run_wizard`] so
+/// `reins setup` can re-run just this portion — without re-running the hard-failure
+/// gate above it — after a non-fatal re-detection.
+fn install_daemon() -> Result<(), SetupError> {
     let reinsd_path = resolve_reinsd_path()?;
 
     #[cfg(target_os = "linux")]
@@ -64,6 +74,49 @@ pub fn run_wizard(
 
     write_setup_marker()?;
     Ok(())
+}
+
+/// Runs `reins setup`'s manual re-detection: re-detects tmux/harness availability
+/// and, unless detection hit a hard failure (tmux missing, or zero harnesses
+/// available), re-runs [`install_daemon`] to (re)install/restart the background
+/// service. Unlike [`run_wizard`], this never exits early on an individual step's
+/// failure — a still-missing single harness or a failed install is reported in the
+/// status table printed at the end, rather than aborting before it prints.
+pub fn run_setup(registry: &adapters::AdapterRegistry, profiles: &[reins_core::HarnessProfile]) {
+    let report = detect::detect(registry, profiles);
+
+    if report.tmux_missing() {
+        eprintln!("reins: {}", SetupError::TmuxMissing);
+    } else if report.no_harness_available() {
+        eprintln!("reins: {}", SetupError::NoHarnessAvailable);
+    } else if let Err(err) = install_daemon() {
+        eprintln!("reins: {err}");
+    }
+
+    print_status(registry, profiles);
+}
+
+/// Prints a compact status table: tmux, each configured harness, and whether the
+/// `reinsd` background service is installed. Used both at the end of `reins setup`
+/// and standalone as its final line of output.
+pub fn print_status(registry: &adapters::AdapterRegistry, profiles: &[reins_core::HarnessProfile]) {
+    let report = detect::detect(registry, profiles);
+    println!(
+        "tmux:        {}",
+        report
+            .tmux
+            .as_deref()
+            .map(|v| format!("✓ {v}"))
+            .unwrap_or("✗ not found".into())
+    );
+    for (id, available) in &report.harnesses {
+        println!("{id:<12} {}", if *available { "✓ available" } else { "✗ not found" });
+    }
+    #[cfg(target_os = "linux")]
+    let installed = daemon::lifecycle::systemd::is_installed();
+    #[cfg(target_os = "macos")]
+    let installed = daemon::lifecycle::launchd::is_installed();
+    println!("daemon:      {}", if installed { "✓ installed" } else { "✗ not installed" });
 }
 
 /// Resolves the path to the `reinsd` binary, which should be a sibling of the running
