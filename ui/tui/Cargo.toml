@@ -11,6 +11,7 @@ path = "src/main.rs"
 reins_core = { path = "../../apps/core" }
 adapters = { path = "../../packages/adapters" }
 proto = { path = "../../packages/proto" }
+daemon = { path = "../../apps/daemon" }
 tokio.workspace = true
 anyhow.workspace = true
 serde.workspace = true

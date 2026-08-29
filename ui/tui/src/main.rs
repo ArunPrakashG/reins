@@ -19,10 +19,49 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() {
+    // Handled before anything else — including before entering the async runtime's
+    // ordinary error path — since this is a standalone elevated re-invocation
+    // (`sudo reins --setup-linger`) run after the wizard printed the instruction, not
+    // part of the normal startup flow, and must never fall through to the TUI.
+    if std::env::args().nth(1).as_deref() == Some("--setup-linger") {
+        handle_setup_linger();
+        return;
+    }
+
     if let Err(err) = run().await {
         eprintln!("reins: {err:#}");
         std::process::exit(1);
     }
+}
+
+/// Runs `--setup-linger`: enables systemd user-linger for the current user so `reinsd`
+/// (started via `systemctl --user`) keeps running across logout. This needs elevated
+/// privileges the wizard itself doesn't have, so it's a separate, explicit re-invocation
+/// (`sudo reins --setup-linger`) rather than re-running the whole wizard under sudo.
+#[cfg(target_os = "linux")]
+fn handle_setup_linger() {
+    let username = match std::process::Command::new("id").arg("-un").output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        Err(err) => {
+            eprintln!("reins: could not determine current user: {err:#}");
+            std::process::exit(1);
+        }
+    };
+    match daemon::lifecycle::systemd::enable_linger(&username) {
+        Ok(()) => {
+            println!("linger enabled for {username}");
+        }
+        Err(err) => {
+            eprintln!("reins: failed to enable linger: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn handle_setup_linger() {
+    eprintln!("reins: --setup-linger is only needed on Linux (systemd)");
+    std::process::exit(1);
 }
 
 async fn run() -> anyhow::Result<()> {
