@@ -6,15 +6,7 @@
 
 use std::path::Path;
 
-#[derive(Debug, thiserror::Error)]
-pub enum LifecycleError {
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("command '{0}' failed: {1}")]
-    CommandFailed(String, String),
-    #[error("permission denied enabling linger — run: sudo reins --setup-linger")]
-    LingerPermissionDenied,
-}
+pub use super::LifecycleError;
 
 const UNIT_TEMPLATE: &str = r#"[Unit]
 Description=Reins daemon (session manager for AI coding CLI harnesses)
