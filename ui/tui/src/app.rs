@@ -1,4 +1,6 @@
-use reins_core::Session;
+use reins_core::{Session, SessionStatus};
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 /// Which field of the inline hire prompt is currently accepting keystrokes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +34,19 @@ pub struct App {
     /// raw mode on the alternate screen, so anything printed to stderr would corrupt
     /// the rendered frame — in-loop messages go here and are drawn by `ui::draw`.
     pub status_message: Option<String>,
+    /// When each currently-`Starting` session was first observed in that status, keyed
+    /// by session id. Drives the "hiring" pulse animation's own elapsed time (Task 12) —
+    /// populated by [`Self::sync_hire_tracking`] and cleared once a session's status
+    /// moves off `Starting` or it drops out of the roster entirely.
+    pub hire_started_at: HashMap<String, Instant>,
+    /// When this `App` was created. Drives the `Running` status glyph's subtle
+    /// continuous pulse, which is keyed off elapsed time since app start rather than
+    /// needing its own per-session tracking state (Task 12).
+    pub started_at: Instant,
+    /// Whether animated status glyphs are enabled (from `config::load().animations`,
+    /// Task 6). Cached here rather than re-read from disk on every frame; the caller
+    /// sets this once at startup.
+    pub animations_enabled: bool,
 }
 
 impl App {
@@ -45,7 +60,29 @@ impl App {
             input_brief: String::new(),
             pane_content: String::new(),
             status_message: None,
+            hire_started_at: HashMap::new(),
+            started_at: Instant::now(),
+            animations_enabled: true,
         }
+    }
+
+    /// Keeps [`Self::hire_started_at`] in sync with the current roster: records "now"
+    /// the first time a session is observed in `Starting`, and drops the entry once the
+    /// session either moves off `Starting` or disappears from the roster (released,
+    /// exited, or otherwise no longer returned by the daemon). Call this after
+    /// refreshing `self.sessions`.
+    pub fn sync_hire_tracking(&mut self) {
+        let still_starting: HashSet<&str> = self
+            .sessions
+            .iter()
+            .filter(|s| s.status == SessionStatus::Starting)
+            .map(|s| s.id.as_str())
+            .collect();
+
+        for id in &still_starting {
+            self.hire_started_at.entry((*id).to_string()).or_insert_with(Instant::now);
+        }
+        self.hire_started_at.retain(|id, _| still_starting.contains(id.as_str()));
     }
 
     /// Records a message for the status line (replacing any previous one).
@@ -280,5 +317,55 @@ mod tests {
         app.sessions = vec![session("a"), session("b")];
         app.select_next();
         assert_eq!(app.selected_session().unwrap().id, "b");
+    }
+
+    fn session_with_status(id: &str, status: SessionStatus) -> Session {
+        let mut s = session(id);
+        s.status = status;
+        s
+    }
+
+    #[test]
+    fn sync_hire_tracking_records_starting_sessions() {
+        let mut app = App::new();
+        app.sessions = vec![session_with_status("a", SessionStatus::Starting)];
+        app.sync_hire_tracking();
+        assert!(app.hire_started_at.contains_key("a"));
+    }
+
+    #[test]
+    fn sync_hire_tracking_clears_entries_once_a_session_leaves_starting() {
+        let mut app = App::new();
+        app.sessions = vec![session_with_status("a", SessionStatus::Starting)];
+        app.sync_hire_tracking();
+        assert!(app.hire_started_at.contains_key("a"));
+
+        app.sessions = vec![session_with_status("a", SessionStatus::Running)];
+        app.sync_hire_tracking();
+        assert!(!app.hire_started_at.contains_key("a"));
+    }
+
+    #[test]
+    fn sync_hire_tracking_clears_entries_for_sessions_dropped_from_the_roster() {
+        let mut app = App::new();
+        app.sessions = vec![session_with_status("a", SessionStatus::Starting)];
+        app.sync_hire_tracking();
+        assert!(app.hire_started_at.contains_key("a"));
+
+        app.sessions = vec![];
+        app.sync_hire_tracking();
+        assert!(app.hire_started_at.is_empty());
+    }
+
+    #[test]
+    fn sync_hire_tracking_does_not_reset_an_already_tracked_start_time() {
+        let mut app = App::new();
+        app.sessions = vec![session_with_status("a", SessionStatus::Starting)];
+        app.sync_hire_tracking();
+        let first = *app.hire_started_at.get("a").unwrap();
+
+        app.sync_hire_tracking();
+        let second = *app.hire_started_at.get("a").unwrap();
+        assert_eq!(first, second);
     }
 }

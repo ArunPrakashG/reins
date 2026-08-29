@@ -192,6 +192,7 @@ async fn run() -> anyhow::Result<()> {
     let rpc = RpcClient::new(socket_path);
 
     let mut app = App::new();
+    app.animations_enabled = config::load().animations;
     refresh_sessions(&rpc, &mut app).await;
     // The initial refresh happens before the terminal is put into raw mode, so a
     // failure here can still be reported the ordinary way on stderr. Every later
@@ -272,6 +273,7 @@ async fn refresh_sessions(rpc: &RpcClient, app: &mut App) {
             if app.selected >= app.sessions.len() {
                 app.selected = app.sessions.len().saturating_sub(1);
             }
+            app.sync_hire_tracking();
         }
         Ok(Response::Ok { .. }) => {
             // Unexpected but non-fatal: leave the roster as-is.

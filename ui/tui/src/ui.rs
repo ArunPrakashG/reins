@@ -6,6 +6,7 @@ use ratatui::Frame;
 use reins_core::SessionStatus;
 
 use crate::app::{App, InputMode};
+use crate::effects::{self, AnimationState};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area: Rect = frame.area();
@@ -65,6 +66,55 @@ fn draw_roster(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     frame.render_stateful_widget(list, area, &mut state);
+    animate_roster_glyphs(frame, app, area, &state);
+}
+
+/// Post-processes the just-rendered roster's status-glyph cells with a looping tachyonfx
+/// pulse for `Starting`/`Running` rows (Task 12), a no-op for everything else — including
+/// the whole roster when `animations = false`, matching the MVP's static `●`/`○` glyphs.
+///
+/// Runs after the `List` widget has drawn into the frame's buffer rather than trying to
+/// fold the effect into `ListItem` construction, since it needs the widget's own
+/// scroll offset (`state.offset()`, only known once rendering has happened) to map a
+/// session index back to the screen row its glyph landed on.
+fn animate_roster_glyphs(frame: &mut Frame, app: &App, area: Rect, state: &ListState) {
+    if !app.animations_enabled || area.width < 3 || area.height < 3 {
+        return;
+    }
+
+    // Inside the `Team` block's border, matching `Block::default().borders(Borders::ALL)`.
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let offset = state.offset();
+    let running_elapsed = app.started_at.elapsed();
+    let buffer = frame.buffer_mut();
+
+    for (index, session) in app.sessions.iter().enumerate().skip(offset) {
+        let row = (index - offset) as u16;
+        if row >= inner.height {
+            break;
+        }
+        let anim_state = effects::animation_state_for(session.status, true);
+        let elapsed = match anim_state {
+            AnimationState::Static => continue,
+            AnimationState::HiringPulse => app
+                .hire_started_at
+                .get(&session.id)
+                .map(|instant| instant.elapsed())
+                .unwrap_or_default(),
+            AnimationState::RunningPulse => running_elapsed,
+        };
+        let glyph_area = Rect { x: inner.x, y: inner.y + row, width: 1, height: 1 };
+        effects::apply_glyph_animation(buffer, glyph_area, anim_state, elapsed);
+    }
 }
 
 /// Renders the selected session's most recently polled tmux pane text as raw,
