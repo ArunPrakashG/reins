@@ -1,6 +1,7 @@
 mod app;
 mod client;
 mod config;
+mod effects;
 mod setup;
 mod ui;
 
@@ -200,6 +201,7 @@ async fn run() -> anyhow::Result<()> {
     }
 
     let mut terminal = init_terminal()?;
+    effects::play_splash(&mut terminal)?;
     let result = event_loop(&mut terminal, &mut app, &rpc).await;
     restore_terminal(&mut terminal)?;
     result

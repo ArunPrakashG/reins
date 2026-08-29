@@ -21,3 +21,4 @@ toml.workspace = true
 ratatui = "0.28"
 crossterm = "0.28"
 vt100 = "0.15"
+tachyonfx = "0.7"
