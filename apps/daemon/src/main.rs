@@ -72,12 +72,32 @@ async fn main() -> anyhow::Result<()> {
     registry.register(Box::new(adapters::ClaudeCodeAdapterFactory));
     registry.register(Box::new(adapters::CodexAdapterFactory));
     registry.register(Box::new(adapters::GeminiCliAdapterFactory));
+    let profiles = load_profiles().context("loading harness profiles")?;
+    let mut available_profiles = Vec::with_capacity(profiles.len());
+    for profile in profiles {
+        match registry.build(&profile.id, profile.clone()) {
+            Ok(adapter) if adapter.is_available() => available_profiles.push(profile),
+            Ok(_) => {
+                println!(
+                    "reinsd: harness '{}' ({}) is not available (binary not found on PATH); filtering it out",
+                    profile.id, profile.display_name
+                );
+            }
+            Err(err) => {
+                println!(
+                    "reinsd: harness '{}' ({}) has no registered adapter, skipping: {err}",
+                    profile.id, profile.display_name
+                );
+            }
+        }
+    }
+    let profiles = std::sync::Arc::new(available_profiles);
+
     let manager = std::sync::Arc::new(session_manager::SessionManager::new(
         registry,
         tmux::TmuxController,
         store,
     ));
-    let profiles = std::sync::Arc::new(load_profiles().context("loading harness profiles")?);
 
     // The roster now persists across restarts, but tmux sessions can die while the
     // daemon is down — reconcile before serving so we never report a dead session as

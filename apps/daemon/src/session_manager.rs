@@ -188,6 +188,7 @@ mod tests {
     impl HarnessAdapter for FakeAdapter {
         fn id(&self) -> &'static str { "fake" }
         fn profile(&self) -> &reins_core::HarnessProfile { unimplemented!() }
+        fn program_name(&self) -> &'static str { "sleep" }
         fn spawn_command(&self, _ctx: &SpawnContext) -> std::process::Command {
             let mut cmd = std::process::Command::new("sleep");
             cmd.arg("30");

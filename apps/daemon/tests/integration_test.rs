@@ -47,6 +47,9 @@ impl HarnessAdapter for FakeAdapter {
     fn profile(&self) -> &HarnessProfile {
         unimplemented!("not exercised by this test")
     }
+    fn program_name(&self) -> &'static str {
+        "sleep"
+    }
     fn spawn_command(&self, _ctx: &SpawnContext) -> std::process::Command {
         let mut cmd = std::process::Command::new("sleep");
         cmd.arg("30");

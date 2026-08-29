@@ -28,8 +28,12 @@ impl HarnessAdapter for CodexAdapter {
         &self.profile
     }
 
+    fn program_name(&self) -> &'static str {
+        "codex"
+    }
+
     fn spawn_command(&self, ctx: &SpawnContext) -> Command {
-        let mut cmd = Command::new("codex");
+        let mut cmd = Command::new(self.program_name());
         cmd.current_dir(&ctx.project_path);
         if let Some(brief) = &ctx.brief {
             cmd.arg(brief);

@@ -28,8 +28,12 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         &self.profile
     }
 
+    fn program_name(&self) -> &'static str {
+        "claude"
+    }
+
     fn spawn_command(&self, ctx: &SpawnContext) -> Command {
-        let mut cmd = Command::new("claude");
+        let mut cmd = Command::new(self.program_name());
         cmd.current_dir(&ctx.project_path);
         if let Some(brief) = &ctx.brief {
             cmd.arg(brief);
