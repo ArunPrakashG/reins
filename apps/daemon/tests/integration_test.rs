@@ -1,10 +1,10 @@
-//! Workspace-wide end-to-end integration test for `reins-daemon`.
+//! Workspace-wide end-to-end integration test for `daemon`.
 //!
 //! Unlike the `#[cfg(test)] mod tests` blocks inside `src/rpc_server.rs` and
 //! `src/session_manager.rs` (which link directly into the crate and can see its
 //! internals), this file lives in `tests/` — Rust's standard integration-test
 //! convention. It is compiled as a wholly separate binary that can only see
-//! `reins_daemon`'s public API (`reins_daemon::rpc_server`, `session_manager`, `tmux`),
+//! `daemon`'s public API (`daemon::rpc_server`, `session_manager`, `tmux`),
 //! the same surface any external embedder would use.
 //!
 //! It drives the full `Hire -> ListSessions -> Release` sequence over the real Unix
@@ -15,9 +15,9 @@
 
 use adapters::{AdapterFactory, AdapterRegistry, HarnessAdapter, SpawnContext, TerminalSnapshot};
 use reins_core::{ConversationTurn, HarnessProfile, HarnessStatus};
-use reins_daemon::rpc_server::run_control_server;
-use reins_daemon::session_manager::SessionManager;
-use reins_daemon::tmux::TmuxController;
+use daemon::rpc_server::run_control_server;
+use daemon::session_manager::SessionManager;
+use daemon::tmux::TmuxController;
 use proto::{Request, Response, ResponseBody};
 use store::SqliteStore;
 use std::path::{Path, PathBuf};
@@ -91,7 +91,7 @@ async fn send(socket_path: &Path, req: &Request) -> Response {
     serde_json::from_str(&line).unwrap()
 }
 
-/// Full round trip through `reins-daemon`'s public API: start `run_control_server` in
+/// Full round trip through `daemon`'s public API: start `run_control_server` in
 /// process, hire a session backed by the fake adapter, list sessions and confirm it
 /// appears, release it, and confirm it's gone.
 #[tokio::test]

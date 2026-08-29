@@ -1,4 +1,4 @@
-//! Library surface for `reins-daemon`, split out from the `reinsd` binary so that
+//! Library surface for `daemon`, split out from the `reinsd` binary so that
 //! external integration tests (in `tests/`) — and any future embedder — can drive the
 //! control server through its real public API instead of duplicating internals.
 //!
