@@ -14,8 +14,109 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use proto::{Request, Response, ResponseBody};
+use reins_core::HarnessProfile;
 use std::io::stdout;
 use std::time::Duration;
+
+/// Harness profile TOML files, embedded into the binary at build time so the wizard's
+/// detection pass sees the same profiles regardless of deployment layout — mirrors
+/// `apps/daemon/src/main.rs`'s `load_profiles`, which the daemon needs for the same
+/// reason once it's actually running.
+const CLAUDE_CODE_PROFILE_TOML: &str =
+    include_str!("../../../packages/adapters/profiles/claude-code.toml");
+const CODEX_PROFILE_TOML: &str = include_str!("../../../packages/adapters/profiles/codex.toml");
+const GEMINI_CLI_PROFILE_TOML: &str =
+    include_str!("../../../packages/adapters/profiles/gemini-cli.toml");
+
+/// Builds the adapter registry used by the first-run setup wizard's detection pass.
+fn registry() -> adapters::AdapterRegistry {
+    let mut registry = adapters::AdapterRegistry::new();
+    registry.register(Box::new(adapters::ClaudeCodeAdapterFactory));
+    registry.register(Box::new(adapters::CodexAdapterFactory));
+    registry.register(Box::new(adapters::GeminiCliAdapterFactory));
+    registry
+}
+
+/// Parses the embedded harness profile TOML files for the wizard's detection pass.
+fn profiles() -> anyhow::Result<Vec<HarnessProfile>> {
+    [
+        ("claude-code.toml", CLAUDE_CODE_PROFILE_TOML),
+        ("codex.toml", CODEX_PROFILE_TOML),
+        ("gemini-cli.toml", GEMINI_CLI_PROFILE_TOML),
+    ]
+    .iter()
+    .map(|(name, raw)| {
+        toml::from_str::<HarnessProfile>(raw)
+            .map_err(|e| anyhow::anyhow!("parsing embedded harness profile '{name}': {e}"))
+    })
+    .collect()
+}
+
+/// Full startup preamble, run before any terminal init so wizard/daemon-start output
+/// prints cleanly to a normal (non-raw-mode) terminal: runs the first-run setup wizard
+/// if the setup-complete marker is absent, then makes sure the daemon is reachable —
+/// trying the installed service first, falling back to spawning `reinsd` directly.
+async fn ensure_ready() -> anyhow::Result<()> {
+    let marker = proto::setup_marker_path()?;
+    if !marker.exists() {
+        setup::run_wizard(&registry(), &profiles()?)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+
+    let socket = proto::control_socket_path()?;
+    if socket_is_alive(&socket).await {
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    let started = daemon::lifecycle::systemd::start_if_installed()?;
+    #[cfg(target_os = "macos")]
+    let started = daemon::lifecycle::launchd::start_if_installed()?;
+
+    if started {
+        wait_for_socket(&socket).await?;
+        return Ok(());
+    }
+
+    // Fallback: no service installed (or it wasn't started elsewhere) — spawn `reinsd`
+    // directly, detached, so the TUI still has a daemon to talk to.
+    spawn_detached_reinsd()?;
+    wait_for_socket(&socket).await?;
+    Ok(())
+}
+
+/// Reuses the same liveness signal the MVP's `refresh_sessions` already relies on to
+/// detect "daemon unreachable" (see its `Err(err) => ... "could not reach reinsd"` arm
+/// below): a failed `UnixStream::connect` means nothing is listening on the socket.
+/// This checks only the connect step, not a full request/response round trip, since a
+/// liveness probe doesn't need to exercise the RPC protocol.
+async fn socket_is_alive(socket: &std::path::Path) -> bool {
+    tokio::net::UnixStream::connect(socket).await.is_ok()
+}
+
+/// Polls the socket for liveness with a bounded number of retries (3s total) rather
+/// than waiting forever, so a daemon that fails to start doesn't hang the TUI launch.
+async fn wait_for_socket(socket: &std::path::Path) -> anyhow::Result<()> {
+    for _ in 0..20 {
+        if socket_is_alive(socket).await {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    anyhow::bail!("daemon did not become ready in time")
+}
+
+/// Spawns `reinsd` directly, detached from the TUI's stdio, as a last-resort fallback
+/// when no installed service could be started (e.g. no systemd/launchd on this system).
+fn spawn_detached_reinsd() -> anyhow::Result<()> {
+    let reinsd_path = setup::resolve_reinsd_path().map_err(|e| anyhow::anyhow!("{e}"))?;
+    std::process::Command::new(reinsd_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() {
@@ -75,6 +176,10 @@ async fn run() -> anyhow::Result<()> {
             _ => {}
         }
     }
+
+    // Runs before any terminal init so a wizard prompt or daemon-start message prints
+    // cleanly to a normal (non-raw-mode) terminal.
+    ensure_ready().await?;
 
     // Same resolution rules as the daemon (see proto::paths) so both ends agree
     // on a private, non-world-writable socket location.

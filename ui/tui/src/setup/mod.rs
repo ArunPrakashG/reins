@@ -70,7 +70,7 @@ pub fn run_wizard(
 /// `reins` binary once both are installed together (e.g. via `cargo install` or a
 /// packaged release placing both in the same bin directory). Falls back to searching
 /// `PATH` if no sibling binary is found.
-fn resolve_reinsd_path() -> Result<PathBuf, SetupError> {
+pub(crate) fn resolve_reinsd_path() -> Result<PathBuf, SetupError> {
     let current = std::env::current_exe()?;
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     resolve_reinsd_path_impl(&current, std::env::split_paths(&path_var))
