@@ -71,6 +71,14 @@ pub fn enable_linger(user: &str) -> Result<(), LifecycleError> {
         // See the "linger permission detection" note below: any non-zero exit here
         // is treated as a permission failure rather than attempting to pattern-match
         // stderr, since that wording isn't stable across systemd versions/locales.
+        // The classification is deliberately coarse, so log the raw stderr here before
+        // discarding it — if the real cause is unrelated (missing binary, D-Bus hiccup,
+        // bad `$USER`), this gives a diagnostic trail instead of leaving the user with
+        // only "run `sudo reins --setup-linger`" and no clue why it failed again.
+        eprintln!(
+            "linger enable failed for user '{user}': {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
         return Err(LifecycleError::LingerPermissionDenied);
     }
     Ok(())

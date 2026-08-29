@@ -184,6 +184,20 @@ async fn run() -> anyhow::Result<()> {
 
     // Runs before any terminal init so a wizard prompt or daemon-start message prints
     // cleanly to a normal (non-raw-mode) terminal.
+    //
+    // Deviation from spec/plan: the design spec (§5) and the original plan (Task 11,
+    // step 4) both specify the brand splash as step 1 of the first-run experience,
+    // played before the tmux/harness checks. In this assembled flow it actually runs
+    // after `ensure_ready()` (which includes the first-run wizard), immediately before
+    // `event_loop` below. This is because the wizard's checklist is printed with plain
+    // `println!`/`eprintln!` to a normal, non-raw-mode terminal — interleaving it with
+    // a ratatui-rendered splash would require either the splash to run outside raw
+    // mode/the alternate screen (defeating the point of a full-screen animated splash)
+    // or the wizard's plain-text output to be redrawn inside ratatui (a much larger
+    // change this late in the plan). So the two effects run in the order the terminal
+    // mode actually allows: plain-text wizard first, then raw-mode splash right before
+    // the TUI takes over. On subsequent (non-first-run) launches this is moot, since
+    // `ensure_ready()` skips the wizard entirely once the setup-complete marker exists.
     ensure_ready().await?;
 
     // Same resolution rules as the daemon (see proto::paths) so both ends agree
@@ -202,38 +216,62 @@ async fn run() -> anyhow::Result<()> {
     }
 
     let mut terminal = init_terminal()?;
+    // Splash plays here, after the wizard rather than before it — see the ordering
+    // note on the `ensure_ready()` call above for why.
     effects::play_splash(&mut terminal)?;
     let result = event_loop(&mut terminal, &mut app, &rpc).await;
     restore_terminal(&mut terminal)?;
     result
 }
 
-fn handle_config_subcommand(args: &[String]) -> anyhow::Result<()> {
+/// Decision made by [`parse_config_args`]: either print the current setting, or write
+/// a new `animations` value. Kept separate from `handle_config_subcommand` so the pure
+/// parsing/decision logic can be unit tested without touching real config I/O or
+/// stdout — mirrors the `resolve_reinsd_path`/`resolve_reinsd_path_impl` split in
+/// `setup/mod.rs`.
+#[derive(Debug, PartialEq, Eq)]
+enum ConfigAction {
+    Print,
+    SetAnimations(bool),
+}
+
+/// Pure logic behind [`handle_config_subcommand`]: decides what `reins config ...`
+/// should do, without performing any I/O. Takes the args following `config` on the
+/// command line (i.e. `args[2..]` from `run()`).
+fn parse_config_args(args: &[String]) -> anyhow::Result<ConfigAction> {
     if args.is_empty() {
         // `reins config` — print current config
-        let cfg = config::load();
-        println!("animations = {}", cfg.animations);
-        Ok(())
+        Ok(ConfigAction::Print)
     } else if args.len() >= 3 && args[0] == "set" && args[1] == "animations" {
         // `reins config set animations on|off`
-        let value = match args[2].as_str() {
-            "on" => true,
-            "off" => false,
-            other => {
-                return Err(anyhow::anyhow!(
-                    "invalid animations value: '{}'; must be 'on' or 'off'",
-                    other
-                ));
-            }
-        };
-        let mut cfg = config::load();
-        cfg.animations = value;
-        config::save(&cfg)?;
-        Ok(())
+        match args[2].as_str() {
+            "on" => Ok(ConfigAction::SetAnimations(true)),
+            "off" => Ok(ConfigAction::SetAnimations(false)),
+            other => Err(anyhow::anyhow!(
+                "invalid animations value: '{}'; must be 'on' or 'off'",
+                other
+            )),
+        }
     } else {
         Err(anyhow::anyhow!(
             "unknown config subcommand; usage: reins config [set animations on|off]"
         ))
+    }
+}
+
+fn handle_config_subcommand(args: &[String]) -> anyhow::Result<()> {
+    match parse_config_args(args)? {
+        ConfigAction::Print => {
+            let cfg = config::load();
+            println!("animations = {}", cfg.animations);
+            Ok(())
+        }
+        ConfigAction::SetAnimations(value) => {
+            let mut cfg = config::load();
+            cfg.animations = value;
+            config::save(&cfg)?;
+            Ok(())
+        }
     }
 }
 
@@ -409,5 +447,71 @@ fn report_action_result(app: &mut App, action: &str, response: anyhow::Result<Re
         }
         Err(err) => app.set_status_message(format!("{action} failed: {err:#}")),
         Ok(Response::Ok { .. }) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn config_no_args_prints_current_setting() {
+        let result = parse_config_args(&args(&[])).expect("no-args should be valid");
+        assert_eq!(result, ConfigAction::Print);
+    }
+
+    #[test]
+    fn config_set_animations_on() {
+        let result =
+            parse_config_args(&args(&["set", "animations", "on"])).expect("'on' should be valid");
+        assert_eq!(result, ConfigAction::SetAnimations(true));
+    }
+
+    #[test]
+    fn config_set_animations_off() {
+        let result = parse_config_args(&args(&["set", "animations", "off"]))
+            .expect("'off' should be valid");
+        assert_eq!(result, ConfigAction::SetAnimations(false));
+    }
+
+    #[test]
+    fn config_set_animations_invalid_value_errors_clearly() {
+        let err = parse_config_args(&args(&["set", "animations", "maybe"]))
+            .expect_err("invalid value should be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("invalid animations value"),
+            "error message should explain the problem, got: {message}"
+        );
+        assert!(
+            message.contains("maybe"),
+            "error message should include the offending value, got: {message}"
+        );
+    }
+
+    #[test]
+    fn config_unknown_subcommand_errors_clearly() {
+        let err = parse_config_args(&args(&["bogus"]))
+            .expect_err("unknown subcommand should be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("unknown config subcommand"),
+            "error message should explain the problem, got: {message}"
+        );
+    }
+
+    #[test]
+    fn config_set_missing_value_errors() {
+        let err = parse_config_args(&args(&["set", "animations"]))
+            .expect_err("missing value should be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("unknown config subcommand"),
+            "error message should explain the problem, got: {message}"
+        );
     }
 }
