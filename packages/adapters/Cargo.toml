@@ -1,10 +1,10 @@
 [package]
-name = "reins-adapters"
+name = "adapters"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-reins-core = { path = "../reins-core" }
+reins_core = { path = "../../apps/core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

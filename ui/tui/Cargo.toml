@@ -1,5 +1,5 @@
 [package]
-name = "reins-tui"
+name = "tui"
 version.workspace = true
 edition.workspace = true
 
@@ -8,8 +8,8 @@ name = "reins"
 path = "src/main.rs"
 
 [dependencies]
-reins-core = { path = "../reins-core" }
-reins-proto = { path = "../reins-proto" }
+reins_core = { path = "../../apps/core" }
+proto = { path = "../../packages/proto" }
 tokio.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true

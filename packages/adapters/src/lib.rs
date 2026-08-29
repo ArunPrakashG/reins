@@ -1,5 +1,8 @@
+#[path = "impl/claude_code.rs"]
 mod claude_code;
+#[path = "impl/codex.rs"]
 mod codex;
+#[path = "impl/gemini_cli.rs"]
 mod gemini_cli;
 mod registry;
 

@@ -1,4 +1,4 @@
-use reins_proto::{Request, Response};
+use proto::{Request, Response};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 

@@ -13,13 +13,13 @@
 //! being installed — consistent with the fake-adapter pattern used by
 //! `session_manager`'s own internal tests.
 
-use reins_adapters::{AdapterFactory, AdapterRegistry, HarnessAdapter, SpawnContext, TerminalSnapshot};
+use adapters::{AdapterFactory, AdapterRegistry, HarnessAdapter, SpawnContext, TerminalSnapshot};
 use reins_core::{ConversationTurn, HarnessProfile, HarnessStatus};
 use reins_daemon::rpc_server::run_control_server;
 use reins_daemon::session_manager::SessionManager;
 use reins_daemon::tmux::TmuxController;
-use reins_proto::{Request, Response, ResponseBody};
-use reins_store::SqliteStore;
+use proto::{Request, Response, ResponseBody};
+use store::SqliteStore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

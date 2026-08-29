@@ -1,5 +1,5 @@
 [package]
-name = "reins-daemon"
+name = "daemon"
 version.workspace = true
 edition.workspace = true
 
@@ -12,10 +12,10 @@ name = "reinsd"
 path = "src/main.rs"
 
 [dependencies]
-reins-core = { path = "../reins-core" }
-reins-adapters = { path = "../reins-adapters" }
-reins-store = { path = "../reins-store" }
-reins-proto = { path = "../reins-proto" }
+reins_core = { path = "../core" }
+adapters = { path = "../../packages/adapters" }
+store = { path = "../store" }
+proto = { path = "../../packages/proto" }
 tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -24,4 +24,4 @@ toml.workspace = true
 vt100 = "0.15"
 
 [dev-dependencies]
-reins-store = { path = "../reins-store", features = ["test-support"] }
+store = { path = "../store", features = ["test-support"] }

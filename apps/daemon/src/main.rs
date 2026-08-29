@@ -5,9 +5,9 @@ use reins_daemon::{rpc_server, session_manager, tmux};
 /// Harness profile TOML files, embedded into the binary at build time so the daemon
 /// ships with them regardless of deployment layout (no need to locate a profiles/
 /// directory at runtime relative to the executable).
-const CLAUDE_CODE_PROFILE_TOML: &str = include_str!("../../reins-adapters/profiles/claude-code.toml");
-const CODEX_PROFILE_TOML: &str = include_str!("../../reins-adapters/profiles/codex.toml");
-const GEMINI_CLI_PROFILE_TOML: &str = include_str!("../../reins-adapters/profiles/gemini-cli.toml");
+const CLAUDE_CODE_PROFILE_TOML: &str = include_str!("../../../packages/adapters/profiles/claude-code.toml");
+const CODEX_PROFILE_TOML: &str = include_str!("../../../packages/adapters/profiles/codex.toml");
+const GEMINI_CLI_PROFILE_TOML: &str = include_str!("../../../packages/adapters/profiles/gemini-cli.toml");
 
 fn load_profiles() -> anyhow::Result<Vec<HarnessProfile>> {
     [
@@ -61,17 +61,17 @@ fn restrict_store_permissions(_path: &std::path::Path) -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let socket_path =
-        reins_proto::control_socket_path().context("resolving the control socket path")?;
+        proto::control_socket_path().context("resolving the control socket path")?;
     let db_path = store_path().context("resolving the session store path")?;
     let store = std::sync::Arc::new(
-        reins_store::SqliteStore::open(&db_path)
+        store::SqliteStore::open(&db_path)
             .with_context(|| format!("opening session store at {}", db_path.display()))?,
     );
     restrict_store_permissions(&db_path)?;
-    let mut registry = reins_adapters::AdapterRegistry::new();
-    registry.register(Box::new(reins_adapters::ClaudeCodeAdapterFactory));
-    registry.register(Box::new(reins_adapters::CodexAdapterFactory));
-    registry.register(Box::new(reins_adapters::GeminiCliAdapterFactory));
+    let mut registry = adapters::AdapterRegistry::new();
+    registry.register(Box::new(adapters::ClaudeCodeAdapterFactory));
+    registry.register(Box::new(adapters::CodexAdapterFactory));
+    registry.register(Box::new(adapters::GeminiCliAdapterFactory));
     let manager = std::sync::Arc::new(session_manager::SessionManager::new(
         registry,
         tmux::TmuxController,

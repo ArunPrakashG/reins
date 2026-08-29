@@ -1,18 +1,18 @@
 use crate::tmux::TmuxController;
-use reins_adapters::{AdapterRegistry, HarnessAdapter};
+use adapters::{AdapterRegistry, HarnessAdapter};
 use reins_core::{Session, SessionStatus};
-use reins_store::ConversationStore;
+use store::ConversationStore;
 use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionManagerError {
     #[error("adapter registry error: {0}")]
-    Registry(#[from] reins_adapters::RegistryError),
+    Registry(#[from] adapters::RegistryError),
     #[error("tmux error: {0}")]
     Tmux(#[from] crate::tmux::TmuxError),
     #[error("store error: {0}")]
-    Store(#[from] reins_store::StoreError),
+    Store(#[from] store::StoreError),
     #[error("no session found with id '{0}'")]
     SessionNotFound(String),
     #[error("no profile registered for harness id '{0}'")]
@@ -42,7 +42,7 @@ impl SessionManager {
         brief: Option<String>,
     ) -> Result<Session, SessionManagerError> {
         let adapter = self.registry.build(harness_id, profile)?;
-        let ctx = reins_adapters::SpawnContext {
+        let ctx = adapters::SpawnContext {
             project_path: project_path.to_path_buf(),
             role: role.clone(),
             brief,
@@ -172,9 +172,9 @@ fn uuid_v4() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reins_adapters::{AdapterFactory, HarnessAdapter, SpawnContext, TerminalSnapshot};
+    use adapters::{AdapterFactory, HarnessAdapter, SpawnContext, TerminalSnapshot};
     use reins_core::{ConversationTurn, HarnessStatus};
-    use reins_store::SqliteStore;
+    use store::SqliteStore;
     use std::path::PathBuf;
 
     struct FakeAdapter;

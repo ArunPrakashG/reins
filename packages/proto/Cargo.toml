@@ -1,8 +1,9 @@
 [package]
-name = "reins-core"
+name = "proto"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+reins_core = { path = "../../apps/core" }
 serde.workspace = true
-thiserror.workspace = true
+serde_json.workspace = true

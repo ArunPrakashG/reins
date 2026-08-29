@@ -11,7 +11,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use reins_proto::{Request, Response, ResponseBody};
+use proto::{Request, Response, ResponseBody};
 use std::io::stdout;
 use std::time::Duration;
 
@@ -24,9 +24,9 @@ async fn main() {
 }
 
 async fn run() -> anyhow::Result<()> {
-    // Same resolution rules as the daemon (see reins_proto::paths) so both ends agree
+    // Same resolution rules as the daemon (see proto::paths) so both ends agree
     // on a private, non-world-writable socket location.
-    let socket_path = reins_proto::control_socket_path()?;
+    let socket_path = proto::control_socket_path()?;
     let rpc = RpcClient::new(socket_path);
 
     let mut app = App::new();

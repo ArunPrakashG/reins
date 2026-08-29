@@ -1,17 +1,17 @@
 use crate::session_manager::SessionManager;
-use reins_adapters::TerminalSnapshot;
+use adapters::TerminalSnapshot;
 use reins_core::{
     CapabilityRouter, HarnessProfile, HarnessStatus, ManualRouter, SessionStatus, TaskDescription,
 };
-use reins_proto::{Request, Response, ResponseBody};
+use proto::{Request, Response, ResponseBody};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 /// Starts the JSON-RPC control server, listening on `socket_path` for newline-delimited
-/// `reins_proto::Request` JSON messages and replying with newline-delimited
-/// `reins_proto::Response` JSON messages. Runs forever (until the process exits or the
+/// `proto::Request` JSON messages and replying with newline-delimited
+/// `proto::Response` JSON messages. Runs forever (until the process exits or the
 /// task is aborted) — callers that want it to run in the background should
 /// `tokio::spawn` this future themselves.
 ///
@@ -25,7 +25,7 @@ pub async fn run_control_server(
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
     // Defence in depth: the socket's directory is already private (0700, see
-    // `reins_proto::paths::control_socket_path`), but the socket file itself is created
+    // `proto::paths::control_socket_path`), but the socket file itself is created
     // subject to the process umask, so narrow it explicitly. On Linux, connect(2) checks
     // write permission on the socket inode, so 0600 restricts control-plane access —
     // which can spawn harness processes as the daemon's owner — to that owner.
@@ -213,8 +213,8 @@ fn handle_request(
 mod tests {
     use super::*;
     use crate::tmux::TmuxController;
-    use reins_adapters::AdapterRegistry;
-    use reins_store::SqliteStore;
+    use adapters::AdapterRegistry;
+    use store::SqliteStore;
     use tokio::io::AsyncBufReadExt;
 
     fn sample_profiles() -> Arc<Vec<HarnessProfile>> {
@@ -296,7 +296,7 @@ mod tests {
         let socket_path = std::env::temp_dir().join(format!("reins-test2-{}.sock", std::process::id()));
         let store = Arc::new(SqliteStore::open_in_memory().unwrap());
         let mut registry = AdapterRegistry::new();
-        registry.register(Box::new(reins_adapters::ClaudeCodeAdapterFactory));
+        registry.register(Box::new(adapters::ClaudeCodeAdapterFactory));
         let manager = Arc::new(SessionManager::new(registry, TmuxController, store));
         let profiles = sample_profiles();
 
@@ -360,7 +360,7 @@ mod tests {
         let socket_path = std::env::temp_dir().join(format!("reins-test3-{}.sock", std::process::id()));
         let store = Arc::new(SqliteStore::open_in_memory().unwrap());
         let mut registry = AdapterRegistry::new();
-        registry.register(Box::new(reins_adapters::ClaudeCodeAdapterFactory));
+        registry.register(Box::new(adapters::ClaudeCodeAdapterFactory));
         let manager = Arc::new(SessionManager::new(registry, TmuxController, store));
         let profiles = sample_profiles();
 

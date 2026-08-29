@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "reins-core",
-    "reins-adapters",
-    "reins-store",
-    "reins-daemon",
-    "reins-tui",
-    "reins-proto",
+    "apps/core",
+    "apps/daemon",
+    "apps/store",
+    "packages/proto",
+    "packages/adapters",
+    "ui/tui",
 ]
 
 [workspace.package]

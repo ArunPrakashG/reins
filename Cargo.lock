@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "adapters"
+version = "0.1.0"
+dependencies = [
+ "reins_core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -112,6 +123,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "acdd7c62a3665c7f6830a51635d9ac9b23ed385797f70a83bb8bafe9c572ab2b"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "daemon"
+version = "0.1.0"
+dependencies = [
+ "adapters",
+ "anyhow",
+ "proto",
+ "reins_core",
+ "serde_json",
+ "store",
+ "thiserror",
+ "tokio",
+ "toml",
+ "vt100",
 ]
 
 [[package]]
@@ -410,6 +437,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "proto"
+version = "0.1.0"
+dependencies = [
+ "reins_core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -449,70 +485,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "reins-adapters"
-version = "0.1.0"
-dependencies = [
- "reins-core",
- "serde",
- "serde_json",
- "thiserror",
- "toml",
-]
-
-[[package]]
-name = "reins-core"
+name = "reins_core"
 version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror",
-]
-
-[[package]]
-name = "reins-daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "reins-adapters",
- "reins-core",
- "reins-proto",
- "reins-store",
- "serde_json",
- "thiserror",
- "tokio",
- "toml",
- "vt100",
-]
-
-[[package]]
-name = "reins-proto"
-version = "0.1.0"
-dependencies = [
- "reins-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "reins-store"
-version = "0.1.0"
-dependencies = [
- "reins-core",
- "rusqlite",
- "thiserror",
-]
-
-[[package]]
-name = "reins-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossterm",
- "ratatui",
- "reins-core",
- "reins-proto",
- "serde_json",
- "tokio",
- "vt100",
 ]
 
 [[package]]
@@ -672,6 +649,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "store"
+version = "0.1.0"
+dependencies = [
+ "reins_core",
+ "rusqlite",
+ "thiserror",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -809,6 +795,20 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+
+[[package]]
+name = "tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "proto",
+ "ratatui",
+ "reins_core",
+ "serde_json",
+ "tokio",
+ "vt100",
+]
 
 [[package]]
 name = "unicode-ident"
