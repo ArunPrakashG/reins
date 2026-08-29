@@ -69,14 +69,21 @@ fn draw_roster(frame: &mut Frame, app: &App, area: Rect) {
     animate_roster_glyphs(frame, app, area, &state);
 }
 
-/// Post-processes the just-rendered roster's status-glyph cells with a looping tachyonfx
-/// pulse for `Starting`/`Running` rows (Task 12), a no-op for everything else — including
-/// the whole roster when `animations = false`, matching the MVP's static `●`/`○` glyphs.
+/// Post-processes the just-rendered roster's status-glyph cells with a looping pulse
+/// for `Starting`/`Running` rows (Task 12), a no-op for everything else — including the
+/// whole roster when `animations = false`, matching the MVP's static `●`/`○` glyphs.
 ///
 /// Runs after the `List` widget has drawn into the frame's buffer rather than trying to
 /// fold the effect into `ListItem` construction, since it needs the widget's own
 /// scroll offset (`state.offset()`, only known once rendering has happened) to map a
 /// session index back to the screen row its glyph landed on.
+///
+/// Each row's pulse color is computed directly by `effects::apply_glyph_animation` as a
+/// pure function of elapsed time (hire time for a `Starting` row, app start for a
+/// `Running` row) — see that function's doc comment for why this doesn't drive a
+/// `tachyonfx::Effect` the way `effects::play_splash` does for the one-shot splash: two
+/// independent bugs were found in review when a `tachyonfx` `Effect`-based approach was
+/// tried for this looping breathing pulse.
 fn animate_roster_glyphs(frame: &mut Frame, app: &App, area: Rect, state: &ListState) {
     if !app.animations_enabled || area.width < 3 || area.height < 3 {
         return;

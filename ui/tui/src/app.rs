@@ -38,6 +38,16 @@ pub struct App {
     /// by session id. Drives the "hiring" pulse animation's own elapsed time (Task 12) —
     /// populated by [`Self::sync_hire_tracking`] and cleared once a session's status
     /// moves off `Starting` or it drops out of the roster entirely.
+    ///
+    /// `ui::animate_roster_glyphs` feeds `Instant::elapsed()` off this straight into
+    /// `effects::apply_glyph_animation`, which computes the pulse color as a pure
+    /// function of elapsed-time-mod-period (see `effects::pulse_alpha`'s doc comment) —
+    /// there's no persistent `tachyonfx::Effect` state to keep in sync here, unlike
+    /// `effects::play_splash`'s one-shot entrance effect. An earlier version of this
+    /// code tried driving a real `tachyonfx` `Effect` (`fx::ping_pong(fx::fade_to_fg(..))`)
+    /// for this, which turned out to be broken in two independent ways under code
+    /// review — see `effects::pulse_alpha` for the full explanation of why the animation
+    /// is computed by hand instead.
     pub hire_started_at: HashMap<String, Instant>,
     /// When this `App` was created. Drives the `Running` status glyph's subtle
     /// continuous pulse, which is keyed off elapsed time since app start rather than
