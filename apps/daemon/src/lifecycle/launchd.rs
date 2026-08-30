@@ -81,15 +81,29 @@ pub fn restart_if_installed() -> Result<bool, LifecycleError> {
 /// Whether the `reinsd` daemon is currently active (running), as opposed to
 /// merely installed. Used after a restart to sanity-check the new binary
 /// actually came back up.
+///
+/// `launchctl print`'s exit code alone only tells us the target *resolves*
+/// (i.e. is loaded/bootstrapped) — it still exits 0 for a loaded job whose
+/// process has crashed. The actual run state is reported in its stdout as a
+/// `state = running` (vs. `state = not running`) line, so that's what this
+/// checks; a non-zero exit (target not loaded at all) is still treated as
+/// not-active, same as before.
 pub fn is_active() -> bool {
     let Ok(uid) = current_uid() else {
         return false;
     };
-    std::process::Command::new("launchctl")
+    let Ok(output) = std::process::Command::new("launchctl")
         .args(["print", &format!("gui/{uid}/dev.reins.daemon")])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.trim().contains("state = running"))
 }
 
 /// Resolves the current user's UID by shelling out to `id -u` and parsing its output.
