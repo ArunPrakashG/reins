@@ -5,18 +5,20 @@ mod effects;
 mod setup;
 mod ui;
 
-use app::App;
+use app::{App, InputMode};
 use client::RpcClient;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use proto::{Request, Response, ResponseBody};
+use proto::{KeyInput, Request, Response, ResponseBody};
 use reins_core::HarnessProfile;
 use std::io::stdout;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Harness profile TOML files, embedded into the binary at build time so the wizard's
@@ -119,12 +121,48 @@ fn spawn_detached_reinsd() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Spawns background tasks that catch real OS-level SIGINT/SIGTERM (e.g. `kill`, a
+/// closing terminal emulator sending SIGHUP-then-SIGTERM, `systemctl stop` if `reins`
+/// were ever run as a unit) — as opposed to a Ctrl+C *keypress*, which arrives as an
+/// ordinary [`Event::Key`] once raw mode is active (raw mode disables the terminal's
+/// own ISIG handling, so Ctrl+C never generates a real SIGINT for us to catch).
+///
+/// The returned flag is set (never cleared here) whenever either signal arrives;
+/// [`event_loop`] polls and clears it once per tick and feeds it into the same
+/// [`App::request_quit`] confirmation flow a keyboard quit uses, rather than exiting
+/// immediately on the very first signal.
+#[cfg(unix)]
+fn spawn_quit_signal_watcher() -> Arc<AtomicBool> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let flag = Arc::new(AtomicBool::new(false));
+
+    for kind in [SignalKind::interrupt(), SignalKind::terminate()] {
+        let flag = flag.clone();
+        // A signal stream that fails to install (e.g. this exact kind already taken
+        // by something else in-process) is not fatal — the keyboard path still works.
+        if let Ok(mut stream) = signal(kind) {
+            tokio::spawn(async move {
+                loop {
+                    stream.recv().await;
+                    flag.store(true, Ordering::SeqCst);
+                }
+            });
+        }
+    }
+
+    flag
+}
+
 #[tokio::main]
 async fn main() {
     // Handled before anything else — including before entering the async runtime's
-    // ordinary error path — since this is a standalone elevated re-invocation
-    // (`sudo reins --setup-linger`) run after the wizard printed the instruction, not
-    // part of the normal startup flow, and must never fall through to the TUI.
+    // ordinary error path — since this is a standalone elevated re-invocation, not
+    // part of the normal startup flow, and must never fall through to the TUI. The
+    // wizard's primary path now prompts for sudo inline (see `install_daemon` in
+    // `setup/mod.rs`); this flag remains as a manual fallback for retrying just the
+    // linger step standalone if that inline prompt didn't work (e.g. cancelled, or
+    // the wizard ran somewhere without a real interactive terminal for `sudo`).
     if std::env::args().nth(1).as_deref() == Some("--setup-linger") {
         handle_setup_linger();
         return;
@@ -137,9 +175,10 @@ async fn main() {
 }
 
 /// Runs `--setup-linger`: enables systemd user-linger for the current user so `reinsd`
-/// (started via `systemctl --user`) keeps running across logout. This needs elevated
-/// privileges the wizard itself doesn't have, so it's a separate, explicit re-invocation
-/// (`sudo reins --setup-linger`) rather than re-running the whole wizard under sudo.
+/// (started via `systemctl --user`) keeps running across logout. The wizard normally
+/// handles this itself via an inline `sudo` prompt (see `install_daemon` in
+/// `setup/mod.rs`); this standalone re-invocation is a fallback for retrying just this
+/// step under `sudo reins --setup-linger` if that inline prompt didn't succeed.
 #[cfg(target_os = "linux")]
 fn handle_setup_linger() {
     let username = match std::process::Command::new("id").arg("-un").output() {
@@ -219,7 +258,11 @@ async fn run() -> anyhow::Result<()> {
     // Splash plays here, after the wizard rather than before it — see the ordering
     // note on the `ensure_ready()` call above for why.
     effects::play_splash(&mut terminal)?;
-    let result = event_loop(&mut terminal, &mut app, &rpc).await;
+    // Reins targets Linux and macOS only (both Unix; see the packaging spec's platform
+    // scope), so this is unconditional rather than `#[cfg(unix)]`-gated at the call site.
+    let quit_signal = spawn_quit_signal_watcher();
+
+    let result = event_loop(&mut terminal, &mut app, &rpc, &quit_signal).await;
     restore_terminal(&mut terminal)?;
     result
 }
@@ -325,45 +368,84 @@ async fn refresh_sessions(rpc: &RpcClient, app: &mut App) {
     }
 }
 
-/// Polls the daemon for the selected session's latest tmux pane text. Best-effort:
-/// errors are silently ignored so a transient RPC hiccup doesn't interrupt the UI.
+/// Polls the daemon for the selected session's latest pane content (color-coded text
+/// plus cursor position — see `ResponseBody::PaneSnapshot`). Best-effort: errors are
+/// silently ignored so a transient RPC hiccup doesn't interrupt the UI.
 async fn refresh_pane(rpc: &RpcClient, app: &mut App) {
     let Some(session) = app.selected_session() else {
         app.pane_content.clear();
         return;
     };
     let session_id = session.id.clone();
-    if let Ok(Response::Ok { result: ResponseBody::PaneSnapshot(text) }) =
+    if let Ok(Response::Ok { result: ResponseBody::PaneSnapshot { text, cursor } }) =
         rpc.send(Request::GetPaneSnapshot { session_id }).await
     {
         app.pane_content = text;
+        app.pane_cursor = cursor;
     }
 }
+
+/// Pane poll interval outside focus mode — comfortably inside the 200-500ms target
+/// from the brief.
+const PANE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Pane poll interval while focused on a session's pane: quick enough that typed
+/// input and the harness's response both feel live, not a periodic refresh.
+const FOCUSED_PANE_POLL_INTERVAL: Duration = Duration::from_millis(80);
 
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
     rpc: &RpcClient,
+    quit_signal: &AtomicBool,
 ) -> anyhow::Result<()> {
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
+        // An external SIGINT/SIGTERM (see `spawn_quit_signal_watcher`) goes through
+        // the exact same confirm-to-quit flow a keyboard quit does, rather than
+        // exiting on the very first signal. Suppressed while focused: a signal arriving
+        // mid-focus shouldn't fight with keystrokes meant for the harness — the prefix
+        // chord (Ctrl-B d) is the way out of focus mode, matching how 'q'/Ctrl+C are
+        // also forwarded to the pane instead of quitting reins while focused.
+        if !app.is_focused() && quit_signal.swap(false, Ordering::SeqCst) && app.request_quit() {
+            break;
+        }
+
         // event::poll blocks (synchronously) for up to this long, which doubles as our
-        // pane-refresh tick — comfortably inside the 200-500ms target from the brief.
-        if event::poll(Duration::from_millis(250))? {
+        // pane-refresh tick. Shorter while focused so typing feels live.
+        let poll_interval =
+            if app.is_focused() { FOCUSED_PANE_POLL_INTERVAL } else { PANE_POLL_INTERVAL };
+        if event::poll(poll_interval)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                // Any keypress dismisses a stale status message; the handlers below
-                // then set a fresh one if this action fails too.
-                app.clear_status_message();
-                if app.input_mode.is_some() {
-                    handle_input_mode_key(key.code, app, rpc).await;
-                } else if key.code == KeyCode::Char('q') {
-                    break;
+
+                if app.is_focused() {
+                    handle_focused_mode_key(key, app, rpc).await;
                 } else {
-                    handle_normal_mode_key(key.code, app, rpc).await;
+                    // Any keypress dismisses a stale status message; the handlers
+                    // below then set a fresh one if this action fails too. The quit
+                    // warning itself is separate state (`App::quit_warning_active`),
+                    // not routed through `status_message`, so clearing this first
+                    // doesn't clobber it. Skipped in focus mode above: there, 'q' and
+                    // Ctrl+C are keystrokes for the harness, not a reins command.
+                    app.clear_status_message();
+
+                    let is_quit_key = app.input_mode.is_none()
+                        && (key.code == KeyCode::Char('q')
+                            || (key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL)));
+
+                    if is_quit_key {
+                        if app.request_quit() {
+                            break;
+                        }
+                    } else if app.input_mode.is_some() {
+                        handle_input_mode_key(key.code, app, rpc).await;
+                    } else {
+                        handle_normal_mode_key(key.code, app, rpc).await;
+                    }
                 }
             }
         }
@@ -371,6 +453,75 @@ async fn event_loop(
         refresh_pane(rpc, app).await;
     }
     Ok(())
+}
+
+/// Handles a keypress while focused on a session's pane: the focus-mode prefix chord
+/// (`Ctrl-B`) claims the *next* keystroke as a reins command (currently only `d`,
+/// defocus — mirroring tmux's own detach chord, since anyone using reins already has
+/// tmux sessions underneath it) rather than forwarding it; every other keystroke,
+/// `q`/Ctrl+C/arrows included, is translated and sent straight into the pane.
+async fn handle_focused_mode_key(key: crossterm::event::KeyEvent, app: &mut App, rpc: &RpcClient) {
+    if !app.take_prefix_pending() {
+        if key.code == KeyCode::Char('b') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            app.arm_prefix();
+            return;
+        }
+    } else {
+        // This keystroke follows a prefix chord: it's a reins command, or (matching
+        // tmux's own behavior for an unbound prefix key) silently dropped rather than
+        // forwarded — a partial prefix chord should never leak into the pane as a
+        // stray 'd' or whatever else was pressed.
+        if key.code == KeyCode::Char('d') {
+            app.exit_focus();
+        }
+        return;
+    }
+
+    let Some(session_id) = app.selected_session().map(|s| s.id.clone()) else {
+        return;
+    };
+    let Some(input) = key_event_to_input(key) else {
+        return;
+    };
+    if let Err(err) = rpc.send(Request::SendKeys { session_id, input }).await {
+        app.set_status_message(format!("could not send input: {err:#}"));
+    }
+}
+
+/// Translates one crossterm key event into the wire representation
+/// `Request::SendKeys` expects — printable characters become literal text
+/// (`send-keys -l`), everything else maps onto tmux's own named-key vocabulary
+/// (`"Enter"`, `"Left"`, `"C-c"`, ...) rather than reins hand-rolling ANSI escape
+/// sequences itself. Returns `None` for key codes with no tmux equivalent (e.g. media
+/// keys) — dropped rather than guessed at.
+fn key_event_to_input(key: crossterm::event::KeyEvent) -> Option<KeyInput> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Char(c) if ctrl => {
+            Some(KeyInput::Named { token: format!("C-{}", c.to_ascii_lowercase()) })
+        }
+        KeyCode::Char(c) if alt => {
+            Some(KeyInput::Named { token: format!("M-{}", c.to_ascii_lowercase()) })
+        }
+        KeyCode::Char(c) => Some(KeyInput::Literal { text: c.to_string() }),
+        KeyCode::Enter => Some(KeyInput::Named { token: "Enter".into() }),
+        KeyCode::Backspace => Some(KeyInput::Named { token: "BSpace".into() }),
+        KeyCode::Tab => Some(KeyInput::Named { token: "Tab".into() }),
+        KeyCode::BackTab => Some(KeyInput::Named { token: "BTab".into() }),
+        KeyCode::Esc => Some(KeyInput::Named { token: "Escape".into() }),
+        KeyCode::Left => Some(KeyInput::Named { token: "Left".into() }),
+        KeyCode::Right => Some(KeyInput::Named { token: "Right".into() }),
+        KeyCode::Up => Some(KeyInput::Named { token: "Up".into() }),
+        KeyCode::Down => Some(KeyInput::Named { token: "Down".into() }),
+        KeyCode::Home => Some(KeyInput::Named { token: "Home".into() }),
+        KeyCode::End => Some(KeyInput::Named { token: "End".into() }),
+        KeyCode::PageUp => Some(KeyInput::Named { token: "PageUp".into() }),
+        KeyCode::PageDown => Some(KeyInput::Named { token: "PageDown".into() }),
+        KeyCode::Delete => Some(KeyInput::Named { token: "Delete".into() }),
+        KeyCode::F(n) => Some(KeyInput::Named { token: format!("F{n}") }),
+        _ => None,
+    }
 }
 
 /// Optional text fields in the hire prompt: an empty buffer means "not supplied".
@@ -386,13 +537,23 @@ fn none_if_empty(value: String) -> Option<String> {
 async fn handle_input_mode_key(code: KeyCode, app: &mut App, rpc: &RpcClient) {
     match code {
         KeyCode::Esc => app.cancel_input(),
+        // Up/down move the harness picker's highlight during that step; everywhere
+        // else in the prompt these keys don't do anything (only Role/Brief accept
+        // free text, via push_char/backspace below).
+        KeyCode::Up if app.input_mode == Some(InputMode::HarnessId) => app.picker_prev(),
+        KeyCode::Down if app.input_mode == Some(InputMode::HarnessId) => app.picker_next(),
         KeyCode::Backspace => app.backspace(),
         KeyCode::Char(c) => app.push_char(c),
         KeyCode::Enter => {
             if let Some(input) = app.advance_input() {
-                let project_path = std::env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| ".".to_string());
+                // An emptied-out working-directory field (e.g. backspaced away
+                // entirely) falls back to reins' own current directory, same as the
+                // pre-picker default — never sends an empty project_path.
+                let project_path = none_if_empty(input.working_dir).unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| ".".to_string())
+                });
                 let req = Request::Hire {
                     harness_id: input.harness_id,
                     project_path,
@@ -418,7 +579,32 @@ async fn handle_normal_mode_key(code: KeyCode, app: &mut App, rpc: &RpcClient) {
     match code {
         KeyCode::Down => app.select_next(),
         KeyCode::Up => app.select_prev(),
-        KeyCode::Char('h') => app.start_hire_input(),
+        KeyCode::Enter => {
+            if !app.enter_focus() {
+                app.set_status_message("select a team member first (up/down)");
+            }
+        }
+        KeyCode::Char('h') => {
+            match rpc.send(Request::ListHarnesses).await {
+                Ok(Response::Ok { result: ResponseBody::Harnesses(harnesses) }) => {
+                    let default_working_dir = std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if !app.start_hire_input(harnesses, default_working_dir) {
+                        app.set_status_message(
+                            "no available harness CLIs — install one and run `reins setup`",
+                        );
+                    }
+                }
+                Ok(Response::Err { message }) => {
+                    app.set_status_message(format!("could not list harnesses: {message}"));
+                }
+                Ok(Response::Ok { .. }) => {}
+                Err(err) => {
+                    app.set_status_message(format!("could not reach reinsd: {err:#}"));
+                }
+            }
+        }
         KeyCode::Char('r') => {
             if let Some(session_id) = app.selected_session().map(|s| s.id.clone()) {
                 let response = rpc.send(Request::Release { session_id }).await;
@@ -456,6 +642,64 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn key_event_to_input_sends_plain_characters_as_literal_text() {
+        let input = key_event_to_input(key(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+        assert_eq!(input, KeyInput::Literal { text: "a".into() });
+    }
+
+    #[test]
+    fn key_event_to_input_maps_ctrl_chars_to_tmux_named_tokens() {
+        let input = key_event_to_input(key(KeyCode::Char('c'), KeyModifiers::CONTROL)).unwrap();
+        assert_eq!(input, KeyInput::Named { token: "C-c".into() });
+    }
+
+    #[test]
+    fn key_event_to_input_maps_alt_chars_to_meta_tokens() {
+        let input = key_event_to_input(key(KeyCode::Char('b'), KeyModifiers::ALT)).unwrap();
+        assert_eq!(input, KeyInput::Named { token: "M-b".into() });
+    }
+
+    #[test]
+    fn key_event_to_input_maps_special_keys_to_tmux_key_names() {
+        let cases = [
+            (KeyCode::Enter, "Enter"),
+            (KeyCode::Backspace, "BSpace"),
+            (KeyCode::Tab, "Tab"),
+            (KeyCode::BackTab, "BTab"),
+            (KeyCode::Esc, "Escape"),
+            (KeyCode::Left, "Left"),
+            (KeyCode::Right, "Right"),
+            (KeyCode::Up, "Up"),
+            (KeyCode::Down, "Down"),
+            (KeyCode::Home, "Home"),
+            (KeyCode::End, "End"),
+            (KeyCode::PageUp, "PageUp"),
+            (KeyCode::PageDown, "PageDown"),
+            (KeyCode::Delete, "Delete"),
+        ];
+        for (code, expected_token) in cases {
+            let input = key_event_to_input(key(code, KeyModifiers::NONE))
+                .unwrap_or_else(|| panic!("{code:?} should map to a token"));
+            assert_eq!(input, KeyInput::Named { token: expected_token.into() }, "for {code:?}");
+        }
+    }
+
+    #[test]
+    fn key_event_to_input_maps_function_keys() {
+        let input = key_event_to_input(key(KeyCode::F(5), KeyModifiers::NONE)).unwrap();
+        assert_eq!(input, KeyInput::Named { token: "F5".into() });
+    }
+
+    #[test]
+    fn key_event_to_input_drops_keys_with_no_tmux_equivalent() {
+        assert_eq!(key_event_to_input(key(KeyCode::Menu, KeyModifiers::NONE)), None);
     }
 
     #[test]

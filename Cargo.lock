@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "adapters"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "reins_core",
  "serde",
@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "daemon"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "adapters",
  "anyhow",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "reins_core",
  "serde",
@@ -556,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "reins_core"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "serde",
  "thiserror",
@@ -726,7 +726,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "store"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "reins_core",
  "rusqlite",
@@ -886,7 +886,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "tui"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "adapters",
  "anyhow",

@@ -1,11 +1,19 @@
-use reins_core::{Session, SessionStatus};
+use reins_core::{HarnessProfile, Session, SessionStatus};
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-/// Which field of the inline hire prompt is currently accepting keystrokes.
+/// How long a first quit request (`q`, Ctrl+C, or an external SIGINT/SIGTERM) stays
+/// "armed" waiting for a confirming second request before it's forgotten.
+pub const QUIT_CONFIRM_WINDOW: Duration = Duration::from_secs(2);
+
+/// Which step of the inline hire prompt is currently active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
+    /// Picking from [`App::available_harnesses`] with up/down — not free text.
     HarnessId,
+    /// Free text, pre-filled with reins' own current directory as a default the user
+    /// can just accept (Enter) or overwrite.
+    WorkingDirectory,
     Role,
     /// The optional opening brief handed to the new team member. Enter on an empty
     /// buffer hires without one.
@@ -16,6 +24,7 @@ pub enum InputMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HireInput {
     pub harness_id: String,
+    pub working_dir: String,
     pub role: String,
     pub brief: String,
 }
@@ -25,11 +34,34 @@ pub struct App {
     pub selected: usize,
     /// `Some(_)` while the three-step inline hire prompt is active; `None` otherwise.
     pub input_mode: Option<InputMode>,
+    /// Harnesses available to hire, fetched via `Request::ListHarnesses` right before
+    /// the prompt opens. Already availability-filtered by the daemon (`is_available()`,
+    /// see `HarnessAdapter`), so every entry here is actually hireable — no dead
+    /// options to guess around. Populated by [`Self::start_hire_input`].
+    pub available_harnesses: Vec<HarnessProfile>,
+    /// Index into `available_harnesses` for the picker's current highlight.
+    pub harness_picker_index: usize,
     pub input_harness_id: String,
+    pub input_working_dir: String,
     pub input_role: String,
     pub input_brief: String,
-    /// Most recently fetched raw tmux pane text for the selected session.
+    /// Most recently fetched pane content for the selected session, as tmux's
+    /// `capture-pane -e` output (color/style escape codes included) — fed into a
+    /// `vt100::Parser` by `ui::draw_pane` for styled rendering, not printed raw.
     pub pane_content: String,
+    /// The selected session's pane cursor position `(x, y)`, from the same
+    /// `GetPaneSnapshot` response as `pane_content`. Only meaningful while
+    /// [`Self::focused`] — the cursor isn't drawn otherwise.
+    pub pane_cursor: (u16, u16),
+    /// `true` while keystrokes are being forwarded into the selected session's pane
+    /// instead of driving reins' own roster navigation — see [`Self::enter_focus`].
+    focused: bool,
+    /// `true` for the one keystroke immediately after the focus-mode prefix chord
+    /// (`Ctrl-B`), which that next keystroke is interpreted as a reins command against
+    /// (currently only `d` to defocus) rather than forwarded to the pane — the same
+    /// prefix-key convention tmux itself uses, so a real keystroke meant for the
+    /// harness is never ambiguous with a command meant for reins.
+    prefix_pending: bool,
     /// Last error/notice to show in the status line. The TUI holds the terminal in
     /// raw mode on the alternate screen, so anything printed to stderr would corrupt
     /// the rendered frame — in-loop messages go here and are drawn by `ui::draw`.
@@ -57,6 +89,11 @@ pub struct App {
     /// Task 6). Cached here rather than re-read from disk on every frame; the caller
     /// sets this once at startup.
     pub animations_enabled: bool,
+    /// `Some(when)` while a quit request (`q`, Ctrl+C, or an external SIGINT/SIGTERM)
+    /// is "armed" waiting for a confirming second request within
+    /// [`QUIT_CONFIRM_WINDOW`]. Set and read via [`Self::request_quit`] and
+    /// [`Self::quit_warning_active`] — never assigned directly outside those.
+    quit_requested_at: Option<Instant>,
 }
 
 impl App {
@@ -65,15 +102,47 @@ impl App {
             sessions: vec![],
             selected: 0,
             input_mode: None,
+            available_harnesses: vec![],
+            harness_picker_index: 0,
             input_harness_id: String::new(),
+            input_working_dir: String::new(),
             input_role: String::new(),
             input_brief: String::new(),
             pane_content: String::new(),
+            pane_cursor: (0, 0),
+            focused: false,
+            prefix_pending: false,
             status_message: None,
             hire_started_at: HashMap::new(),
             started_at: Instant::now(),
             animations_enabled: true,
+            quit_requested_at: None,
         }
+    }
+
+    /// Registers a quit request from any source ('q', Ctrl+C, or an external
+    /// SIGINT/SIGTERM). Returns `true` if this confirms an exit — a prior request is
+    /// still within [`QUIT_CONFIRM_WINDOW`] — in which case the caller should actually
+    /// exit. Returns `false` if this is the first request (or the window on an earlier
+    /// one had already expired), in which case it (re)arms the window and the caller
+    /// should keep running, showing [`Self::quit_warning_active`]'s warning.
+    pub fn request_quit(&mut self) -> bool {
+        let now = Instant::now();
+        if let Some(first) = self.quit_requested_at {
+            if now.duration_since(first) <= QUIT_CONFIRM_WINDOW {
+                return true;
+            }
+        }
+        self.quit_requested_at = Some(now);
+        false
+    }
+
+    /// Whether a "press again to quit" warning should currently be shown — a first
+    /// quit request is still within its confirmation window.
+    pub fn quit_warning_active(&self) -> bool {
+        self.quit_requested_at
+            .map(|first| Instant::now().duration_since(first) <= QUIT_CONFIRM_WINDOW)
+            .unwrap_or(false)
     }
 
     /// Keeps [`Self::hire_started_at`] in sync with the current roster: records "now"
@@ -121,10 +190,28 @@ impl App {
         self.sessions.get(self.selected)
     }
 
-    /// Begins the three-step inline hire prompt, starting on the harness id field.
-    pub fn start_hire_input(&mut self) {
+    /// Begins the four-step inline hire prompt, starting on the harness picker.
+    /// `harnesses` should be the current availability-filtered list from the daemon
+    /// (`Request::ListHarnesses`), fetched by the caller just before this is called.
+    /// `default_working_dir` pre-fills the working-directory step (typically reins' own
+    /// current directory) so accepting the default is just pressing Enter. Returns
+    /// `false` without entering the prompt if the harness list is empty — there's
+    /// nothing to pick, so the caller should show a status message instead of opening
+    /// a picker with zero options.
+    pub fn start_hire_input(
+        &mut self,
+        harnesses: Vec<HarnessProfile>,
+        default_working_dir: impl Into<String>,
+    ) -> bool {
+        if harnesses.is_empty() {
+            return false;
+        }
+        self.available_harnesses = harnesses;
+        self.harness_picker_index = 0;
         self.input_mode = Some(InputMode::HarnessId);
         self.clear_input_fields();
+        self.input_working_dir = default_working_dir.into();
+        true
     }
 
     /// Abandons the inline hire prompt without sending anything.
@@ -135,15 +222,43 @@ impl App {
 
     fn clear_input_fields(&mut self) {
         self.input_harness_id.clear();
+        self.input_working_dir.clear();
         self.input_role.clear();
         self.input_brief.clear();
     }
 
-    /// Appends a character to whichever field of the hire prompt is active. No-op if
-    /// the prompt isn't active.
+    /// Moves the harness picker's highlight forward, wrapping. No-op outside the
+    /// picker step or with nothing to pick from.
+    pub fn picker_next(&mut self) {
+        if !self.available_harnesses.is_empty() {
+            self.harness_picker_index =
+                (self.harness_picker_index + 1) % self.available_harnesses.len();
+        }
+    }
+
+    /// Moves the harness picker's highlight backward, wrapping. No-op outside the
+    /// picker step or with nothing to pick from.
+    pub fn picker_prev(&mut self) {
+        if !self.available_harnesses.is_empty() {
+            self.harness_picker_index = (self.harness_picker_index
+                + self.available_harnesses.len()
+                - 1)
+                % self.available_harnesses.len();
+        }
+    }
+
+    /// The harness profile currently highlighted in the picker, if any.
+    pub fn picker_selected(&self) -> Option<&HarnessProfile> {
+        self.available_harnesses.get(self.harness_picker_index)
+    }
+
+    /// Appends a character to whichever field of the hire prompt is active. The
+    /// harness-id step is a picker, not free text, so this is a no-op there (and when
+    /// the prompt isn't active at all).
     pub fn push_char(&mut self, c: char) {
         match self.input_mode {
-            Some(InputMode::HarnessId) => self.input_harness_id.push(c),
+            Some(InputMode::HarnessId) => {}
+            Some(InputMode::WorkingDirectory) => self.input_working_dir.push(c),
             Some(InputMode::Role) => self.input_role.push(c),
             Some(InputMode::Brief) => self.input_brief.push(c),
             None => {}
@@ -151,11 +266,13 @@ impl App {
     }
 
     /// Removes the last character from whichever field of the hire prompt is active.
-    /// No-op if the prompt isn't active or the field is already empty.
+    /// No-op for the harness-id picker step, when the prompt isn't active, or when the
+    /// field is already empty.
     pub fn backspace(&mut self) {
         match self.input_mode {
-            Some(InputMode::HarnessId) => {
-                self.input_harness_id.pop();
+            Some(InputMode::HarnessId) => {}
+            Some(InputMode::WorkingDirectory) => {
+                self.input_working_dir.pop();
             }
             Some(InputMode::Role) => {
                 self.input_role.pop();
@@ -167,14 +284,27 @@ impl App {
         }
     }
 
-    /// Advances the hire prompt on Enter: harness id → role → brief. Returns `None`
-    /// while more fields remain. Enter on the brief field (empty or not — the brief is
-    /// optional) finishes the prompt, resetting `input_mode` to `None` and returning the
-    /// collected [`HireInput`]. If the prompt wasn't active, returns `None` and does
-    /// nothing.
+    /// Advances the hire prompt on Enter: harness pick → working directory → role →
+    /// brief. Returns `None` while more fields remain. Enter on the harness-id step
+    /// captures the picker's current highlight into `input_harness_id`. Enter on the
+    /// brief field (empty or not — the brief is optional) finishes the prompt,
+    /// resetting `input_mode` to `None` and returning the collected [`HireInput`]. If
+    /// the prompt wasn't active, returns `None` and does nothing.
     pub fn advance_input(&mut self) -> Option<HireInput> {
         match self.input_mode {
             Some(InputMode::HarnessId) => {
+                // `start_hire_input` refuses to enter this mode with an empty list, so
+                // there is always a selected profile here in practice — but stay
+                // defensive rather than assume.
+                let Some(profile) = self.picker_selected() else {
+                    self.input_mode = None;
+                    return None;
+                };
+                self.input_harness_id = profile.id.clone();
+                self.input_mode = Some(InputMode::WorkingDirectory);
+                None
+            }
+            Some(InputMode::WorkingDirectory) => {
                 self.input_mode = Some(InputMode::Role);
                 None
             }
@@ -185,6 +315,7 @@ impl App {
             Some(InputMode::Brief) => {
                 let collected = HireInput {
                     harness_id: self.input_harness_id.clone(),
+                    working_dir: self.input_working_dir.clone(),
                     role: self.input_role.clone(),
                     brief: self.input_brief.clone(),
                 };
@@ -194,6 +325,43 @@ impl App {
             }
             None => None,
         }
+    }
+
+    /// Enters focus mode on the currently selected session: from here, keystrokes are
+    /// forwarded into that session's pane instead of driving reins' own roster
+    /// navigation (see [`Self::prefix_pending`] for how to get back out). Returns
+    /// `false` without entering focus mode if the hire prompt is open or there's no
+    /// session selected to focus.
+    pub fn enter_focus(&mut self) -> bool {
+        if self.input_mode.is_some() || self.selected_session().is_none() {
+            return false;
+        }
+        self.focused = true;
+        true
+    }
+
+    /// Leaves focus mode, returning to normal roster navigation.
+    pub fn exit_focus(&mut self) {
+        self.focused = false;
+        self.prefix_pending = false;
+    }
+
+    /// Whether reins is currently focused on a session's pane.
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    /// Arms the focus-mode prefix: the next keystroke is a reins command (see
+    /// [`Self::take_prefix_pending`]) rather than being forwarded to the pane.
+    pub fn arm_prefix(&mut self) {
+        self.prefix_pending = true;
+    }
+
+    /// Consumes and returns whether a prefix keystroke is currently pending — `true`
+    /// means the caller's current keystroke is the one to interpret as a reins command,
+    /// after which the pending state is cleared either way.
+    pub fn take_prefix_pending(&mut self) -> bool {
+        std::mem::take(&mut self.prefix_pending)
     }
 }
 
@@ -216,6 +384,16 @@ mod tests {
         }
     }
 
+    fn profile(id: &str) -> HarnessProfile {
+        HarnessProfile {
+            id: id.into(),
+            display_name: id.into(),
+            strengths: vec![],
+            constraints: vec![],
+            notes: String::new(),
+        }
+    }
+
     #[test]
     fn select_next_wraps_around() {
         let mut app = App::new();
@@ -227,18 +405,35 @@ mod tests {
     }
 
     #[test]
-    fn hire_input_collects_three_fields_and_resets() {
+    fn hire_input_collects_four_fields_and_resets() {
         let mut app = App::new();
         assert_eq!(app.input_mode, None);
 
-        app.start_hire_input();
+        assert!(app.start_hire_input(
+            vec![profile("claude-code"), profile("codex")],
+            "/default/dir",
+        ));
         assert_eq!(app.input_mode, Some(InputMode::HarnessId));
+        assert_eq!(app.picker_selected().unwrap().id, "claude-code");
+        assert_eq!(app.input_working_dir, "/default/dir", "pre-filled with the default");
 
-        app.push_char('c');
-        app.push_char('c');
-        assert_eq!(app.input_harness_id, "cc");
+        app.picker_next();
+        assert_eq!(app.picker_selected().unwrap().id, "codex");
+        app.picker_next(); // wraps back around
+        assert_eq!(app.picker_selected().unwrap().id, "claude-code");
 
-        // Enter on the first field just advances, no result yet.
+        // Enter on the picker captures the highlight and advances, no result yet.
+        assert_eq!(app.advance_input(), None);
+        assert_eq!(app.input_mode, Some(InputMode::WorkingDirectory));
+        assert_eq!(app.input_harness_id, "claude-code");
+
+        // The working-directory field starts pre-filled but can be edited like any
+        // other free-text field.
+        app.push_char('!');
+        assert_eq!(app.input_working_dir, "/default/dir!");
+        app.backspace();
+        assert_eq!(app.input_working_dir, "/default/dir");
+
         assert_eq!(app.advance_input(), None);
         assert_eq!(app.input_mode, Some(InputMode::Role));
 
@@ -260,30 +455,81 @@ mod tests {
         assert_eq!(
             result,
             Some(HireInput {
-                harness_id: "cc".into(),
+                harness_id: "claude-code".into(),
+                working_dir: "/default/dir".into(),
                 role: "rc".into(),
                 brief: "hi".into(),
             })
         );
         assert_eq!(app.input_mode, None);
         assert_eq!(app.input_harness_id, "");
+        assert_eq!(app.input_working_dir, "");
         assert_eq!(app.input_role, "");
         assert_eq!(app.input_brief, "");
     }
 
     #[test]
+    fn start_hire_input_refuses_an_empty_harness_list() {
+        let mut app = App::new();
+        assert!(!app.start_hire_input(vec![], "/tmp"));
+        assert_eq!(app.input_mode, None);
+    }
+
+    #[test]
+    fn picker_next_and_prev_wrap_around() {
+        let mut app = App::new();
+        app.start_hire_input(vec![profile("a"), profile("b"), profile("c")], "/tmp");
+        assert_eq!(app.harness_picker_index, 0);
+
+        app.picker_prev();
+        assert_eq!(app.harness_picker_index, 2, "prev from the first entry wraps to the last");
+
+        app.picker_next();
+        app.picker_next();
+        assert_eq!(app.harness_picker_index, 1);
+    }
+
+    #[test]
     fn brief_is_optional_and_completes_the_prompt_when_left_empty() {
         let mut app = App::new();
-        app.start_hire_input();
-        app.push_char('c');
-        app.advance_input();
-        app.advance_input();
+        app.start_hire_input(vec![profile("c")], "/tmp");
+        app.advance_input(); // HarnessId -> WorkingDirectory
+        app.advance_input(); // WorkingDirectory -> Role
+        app.advance_input(); // Role -> Brief
         assert_eq!(app.input_mode, Some(InputMode::Brief));
 
         let result = app.advance_input().expect("empty brief still completes the prompt");
         assert_eq!(result.brief, "");
         assert_eq!(result.harness_id, "c");
+        assert_eq!(result.working_dir, "/tmp");
         assert_eq!(app.input_mode, None);
+    }
+
+    #[test]
+    fn first_quit_request_arms_the_warning_without_confirming() {
+        let mut app = App::new();
+        assert!(!app.quit_warning_active());
+
+        let confirmed = app.request_quit();
+
+        assert!(!confirmed, "a lone request shouldn't confirm exit");
+        assert!(app.quit_warning_active());
+    }
+
+    #[test]
+    fn second_quit_request_within_the_window_confirms_exit() {
+        let mut app = App::new();
+        app.request_quit();
+
+        let confirmed = app.request_quit();
+
+        assert!(confirmed, "a second request within the window should confirm exit");
+    }
+
+    #[test]
+    fn quit_warning_is_inactive_before_any_request() {
+        let app = App::new();
+        assert!(!app.quit_warning_active());
     }
 
     #[test]
@@ -299,7 +545,8 @@ mod tests {
     #[test]
     fn cancel_input_clears_state_without_returning_a_result() {
         let mut app = App::new();
-        app.start_hire_input();
+        app.start_hire_input(vec![profile("c")], "/tmp");
+        app.advance_input(); // captures "c" into input_harness_id, moves to WorkingDirectory
         app.push_char('x');
         app.cancel_input();
         assert_eq!(app.input_mode, None);
@@ -327,6 +574,59 @@ mod tests {
         app.sessions = vec![session("a"), session("b")];
         app.select_next();
         assert_eq!(app.selected_session().unwrap().id, "b");
+    }
+
+    #[test]
+    fn enter_focus_requires_a_selected_session() {
+        let mut app = App::new();
+        assert!(app.sessions.is_empty());
+        assert!(!app.enter_focus(), "nothing selected, nothing to focus");
+        assert!(!app.is_focused());
+    }
+
+    #[test]
+    fn enter_focus_refuses_while_the_hire_prompt_is_open() {
+        let mut app = App::new();
+        app.sessions = vec![session("a")];
+        app.start_hire_input(vec![profile("c")], "/tmp");
+
+        assert!(!app.enter_focus(), "hire prompt is open, shouldn't also enter focus mode");
+        assert!(!app.is_focused());
+    }
+
+    #[test]
+    fn enter_and_exit_focus_round_trip() {
+        let mut app = App::new();
+        app.sessions = vec![session("a")];
+
+        assert!(app.enter_focus());
+        assert!(app.is_focused());
+
+        app.exit_focus();
+        assert!(!app.is_focused());
+    }
+
+    #[test]
+    fn exit_focus_also_clears_a_pending_prefix() {
+        let mut app = App::new();
+        app.sessions = vec![session("a")];
+        app.enter_focus();
+        app.arm_prefix();
+
+        app.exit_focus();
+
+        // A defocus-then-refocus shouldn't leave a stale prefix armed from before.
+        assert!(!app.take_prefix_pending());
+    }
+
+    #[test]
+    fn take_prefix_pending_consumes_the_armed_state() {
+        let mut app = App::new();
+        assert!(!app.take_prefix_pending(), "nothing armed yet");
+
+        app.arm_prefix();
+        assert!(app.take_prefix_pending(), "armed prefix should be reported once");
+        assert!(!app.take_prefix_pending(), "and only once");
     }
 
     fn session_with_status(id: &str, status: SessionStatus) -> Session {

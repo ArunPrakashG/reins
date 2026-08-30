@@ -1,6 +1,19 @@
 use reins_core::{HarnessProfile, Session};
 use serde::{Deserialize, Serialize};
 
+/// A single keystroke to forward into a hired harness's tmux pane, in whichever shape
+/// tmux's own `send-keys` wants it. Two shapes rather than one raw-byte blob because
+/// tmux distinguishes them itself: a `Named` token is looked up against tmux's own
+/// key-name vocabulary ("Enter", "Left", "C-c", ...), while `Literal` text is sent
+/// verbatim (`send-keys -l`) so ordinary typed characters can never be misread as a
+/// key name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum KeyInput {
+    Literal { text: String },
+    Named { token: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum Request {
@@ -12,12 +25,16 @@ pub enum Request {
     },
     Release { session_id: String },
     Interrupt { session_id: String },
+    /// Forwards one keystroke into a session's tmux pane — the general-purpose sibling
+    /// of `Interrupt`, which only ever sends the harness's fixed interrupt sequence.
+    SendKeys { session_id: String, input: KeyInput },
     ListSessions { project_path: Option<String> },
     ListHarnesses,
-    /// Requests the most recent captured tmux pane text for a session. This is an
-    /// on-demand, polling-based passthrough for MVP: the daemon captures the pane
-    /// fresh on each request rather than maintaining a background poller. A future
-    /// streaming upgrade (a persistent per-session byte stream) would replace this.
+    /// Requests the most recently captured tmux pane content for a session, with color
+    /// and cursor information for live rendering. On-demand passthrough for MVP: the
+    /// daemon captures the pane fresh on each request rather than maintaining a
+    /// background poller. A future streaming upgrade (a persistent per-session byte
+    /// stream) would replace this.
     GetPaneSnapshot { session_id: String },
 }
 
@@ -34,9 +51,12 @@ pub enum ResponseBody {
     Session(Session),
     Sessions(Vec<Session>),
     Harnesses(Vec<HarnessProfile>),
-    /// Raw tmux pane text captured for a `GetPaneSnapshot` request. Not VT100-interpreted
-    /// (no color/cursor handling) — the TUI renders it as plain text.
-    PaneSnapshot(String),
+    /// Pane content captured for a `GetPaneSnapshot` request: `text` carries tmux's
+    /// `capture-pane -e` output (color/style escape codes included, for the TUI's
+    /// `vt100`-backed renderer), `cursor` is the pane's `(x, y)` cursor position from a
+    /// separate `display-message` query — `capture-pane` itself doesn't encode where
+    /// the cursor actually is.
+    PaneSnapshot { text: String, cursor: (u16, u16) },
     Empty,
 }
 

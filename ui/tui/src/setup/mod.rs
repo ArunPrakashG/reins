@@ -11,7 +11,10 @@ pub enum SetupError {
     NoHarnessAvailable,
     #[error("daemon service install failed: {0}")]
     LifecycleError(String),
-    #[error("linger permission needed — run: sudo reins --setup-linger")]
+    #[error(
+        "could not enable session persistence across a full logout — run \
+         `sudo reins --setup-linger` to retry it standalone"
+    )]
     LingerNeeded,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -60,10 +63,23 @@ fn install_daemon() -> Result<(), SetupError> {
     {
         daemon::lifecycle::systemd::install_and_start(&reinsd_path)
             .map_err(|e| SetupError::LifecycleError(e.to_string()))?;
+        let user = current_username()?;
         if let Err(daemon::lifecycle::systemd::LifecycleError::LingerPermissionDenied) =
-            daemon::lifecycle::systemd::enable_linger(&current_username()?)
+            daemon::lifecycle::systemd::enable_linger(&user)
         {
-            return Err(SetupError::LingerNeeded);
+            // Enabling linger (persisting reinsd across a full logout, not just
+            // app-quit) needs privileges the wizard doesn't have unprivileged.
+            // Rather than exiting and telling the user to re-run under sudo
+            // themselves, prompt for sudo right here — but announce it first,
+            // since a `sudo` password prompt appearing with no warning mid-wizard
+            // looks like something went wrong rather than something expected.
+            println!(
+                "reins: enabling session persistence across a full logout requires \
+                 elevated privileges. You'll be prompted for your sudo password now \
+                 to run: loginctl enable-linger {user}"
+            );
+            daemon::lifecycle::systemd::enable_linger_via_sudo(&user)
+                .map_err(|_| SetupError::LingerNeeded)?;
         }
     }
     #[cfg(target_os = "macos")]

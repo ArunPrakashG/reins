@@ -77,25 +77,26 @@ fn capture_pane_and_sync_status(
     manager: &SessionManager,
     profiles: &[HarnessProfile],
     session: &reins_core::Session,
-) -> Result<String, crate::session_manager::SessionManagerError> {
+) -> Result<crate::tmux::PaneCapture, crate::session_manager::SessionManagerError> {
     if !manager.session_alive(&session.tmux_session_name) {
         manager.sync_status(&session.id, session.status, SessionStatus::Exited)?;
         return Err(crate::session_manager::SessionManagerError::SessionGone(session.id.clone()));
     }
 
-    let text = manager.capture_pane(&session.tmux_session_name)?;
-
-    // Status detection is best-effort with respect to profile availability: a pane
-    // snapshot is still useful even if no profile is registered for this harness id.
+    // Status detection matches on plain content, so it uses its own plain capture
+    // rather than the live/colored one this function returns to the caller — two tmux
+    // calls per poll, but keeps the detector's string matching unaffected by escape
+    // codes.
     if let Some(profile) = profiles.iter().find(|p| p.id == session.harness_id).cloned() {
+        let plain_text = manager.capture_pane(&session.tmux_session_name)?;
         let adapter = manager.adapter_for(&session.harness_id, profile)?;
-        let detected = adapter.detect_status(&TerminalSnapshot { text: text.clone() });
+        let detected = adapter.detect_status(&TerminalSnapshot { text: plain_text });
         if let Some(new_status) = session_status_for(detected) {
             manager.sync_status(&session.id, session.status, new_status)?;
         }
     }
 
-    Ok(text)
+    manager.capture_pane_live(&session.tmux_session_name)
 }
 
 async fn handle_connection(
@@ -202,7 +203,21 @@ fn handle_request(
                 .find_session(&session_id)
                 .and_then(|session| capture_pane_and_sync_status(manager, profiles, &session));
             match result {
-                Ok(text) => Response::Ok { result: ResponseBody::PaneSnapshot(text) },
+                Ok(capture) => Response::Ok {
+                    result: ResponseBody::PaneSnapshot {
+                        text: capture.text,
+                        cursor: (capture.cursor_x, capture.cursor_y),
+                    },
+                },
+                Err(e) => Response::Err { message: e.to_string() },
+            }
+        }
+        Request::SendKeys { session_id, input } => {
+            let result = manager
+                .find_session(&session_id)
+                .and_then(|session| manager.send_key_input(&session.tmux_session_name, &input));
+            match result {
+                Ok(()) => Response::Ok { result: ResponseBody::Empty },
                 Err(e) => Response::Err { message: e.to_string() },
             }
         }
@@ -406,7 +421,7 @@ mod tests {
         let snapshot_resp =
             send(&socket_path, &Request::GetPaneSnapshot { session_id: session_id.clone() }).await;
         match snapshot_resp {
-            Response::Ok { result: ResponseBody::PaneSnapshot(text) } => {
+            Response::Ok { result: ResponseBody::PaneSnapshot { text, cursor: _ } } => {
                 // tmux pads captured panes to the terminal's dimensions, so even a
                 // blank shell prompt produces multiple lines of content.
                 assert!(!text.is_empty(), "expected non-empty pane snapshot text");
@@ -438,6 +453,129 @@ mod tests {
         assert!(matches!(unknown_snapshot, Response::Err { .. }));
 
         // Clean up: release the session so no `reins-*` tmux session is left behind.
+        let release_resp = send(&socket_path, &Request::Release { session_id: session_id.clone() }).await;
+        assert!(matches!(release_resp, Response::Ok { result: ResponseBody::Empty }));
+
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    struct FakeAdapter;
+    struct FakeFactory;
+    impl adapters::AdapterFactory for FakeFactory {
+        fn id(&self) -> &'static str { "fake" }
+        fn create(&self, _profile: HarnessProfile) -> Box<dyn adapters::HarnessAdapter> {
+            Box::new(FakeAdapter)
+        }
+    }
+    impl adapters::HarnessAdapter for FakeAdapter {
+        fn id(&self) -> &'static str { "fake" }
+        fn profile(&self) -> &HarnessProfile { unimplemented!() }
+        fn program_name(&self) -> &'static str { "cat" }
+        fn spawn_command(&self, _ctx: &adapters::SpawnContext) -> std::process::Command {
+            std::process::Command::new("cat")
+        }
+        fn interrupt_keys(&self) -> &[u8] { b"\x03" }
+        fn detect_status(&self, _s: &TerminalSnapshot) -> HarnessStatus { HarnessStatus::Idle }
+        fn log_dir(&self, _ctx: &adapters::SpawnContext) -> std::path::PathBuf { std::path::PathBuf::from("/tmp") }
+        fn parse_log(&self, _path: &std::path::Path) -> Vec<reins_core::ConversationTurn> { vec![] }
+    }
+
+    #[tokio::test]
+    async fn send_keys_round_trips_literal_text_into_a_real_pane() {
+        if std::process::Command::new("tmux").arg("-V").output().is_err() {
+            eprintln!("skipping: tmux not installed");
+            return;
+        }
+        let socket_path = std::env::temp_dir().join(format!("reins-test4-{}.sock", std::process::id()));
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut registry = AdapterRegistry::new();
+        registry.register(Box::new(FakeFactory));
+        let manager = Arc::new(SessionManager::new(registry, TmuxController, store));
+        // `cat` (via FakeAdapter) rather than the real claude-code binary, so the pane's
+        // output is exactly and only what we send it — deterministic to assert on.
+        let profiles = Arc::new(vec![HarnessProfile {
+            id: "fake".into(),
+            display_name: "Fake".into(),
+            strengths: vec![],
+            constraints: vec![],
+            notes: String::new(),
+        }]);
+
+        let path_clone = socket_path.clone();
+        let manager_clone = manager.clone();
+        let profiles_clone = profiles.clone();
+        tokio::spawn(async move {
+            run_control_server(&path_clone, manager_clone, profiles_clone).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        async fn send(socket_path: &Path, req: &Request) -> Response {
+            let mut stream = UnixStream::connect(socket_path).await.unwrap();
+            let mut msg = serde_json::to_string(req).unwrap();
+            msg.push('\n');
+            stream.write_all(msg.as_bytes()).await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+
+        let hire_resp = send(
+            &socket_path,
+            &Request::Hire {
+                harness_id: "fake".into(),
+                project_path: "/tmp".into(),
+                role: None,
+                brief: None,
+            },
+        )
+        .await;
+        let session_id = match hire_resp {
+            Response::Ok { result: ResponseBody::Session(session) } => session.id,
+            other => panic!("expected Ok(Session(..)), got {other:?}"),
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let literal_resp = send(
+            &socket_path,
+            &Request::SendKeys {
+                session_id: session_id.clone(),
+                input: proto::KeyInput::Literal { text: "hello reins".into() },
+            },
+        )
+        .await;
+        assert!(matches!(literal_resp, Response::Ok { result: ResponseBody::Empty }));
+
+        let enter_resp = send(
+            &socket_path,
+            &Request::SendKeys {
+                session_id: session_id.clone(),
+                input: proto::KeyInput::Named { token: "Enter".into() },
+            },
+        )
+        .await;
+        assert!(matches!(enter_resp, Response::Ok { result: ResponseBody::Empty }));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let snapshot_resp =
+            send(&socket_path, &Request::GetPaneSnapshot { session_id: session_id.clone() }).await;
+        match snapshot_resp {
+            Response::Ok { result: ResponseBody::PaneSnapshot { text, .. } } => {
+                assert!(text.contains("hello reins"), "captured pane: {text:?}");
+            }
+            other => panic!("expected Ok(PaneSnapshot(..)), got {other:?}"),
+        }
+
+        let unknown_resp = send(
+            &socket_path,
+            &Request::SendKeys {
+                session_id: "does-not-exist".into(),
+                input: proto::KeyInput::Literal { text: "x".into() },
+            },
+        )
+        .await;
+        assert!(matches!(unknown_resp, Response::Err { .. }));
+
         let release_resp = send(&socket_path, &Request::Release { session_id: session_id.clone() }).await;
         assert!(matches!(release_resp, Response::Ok { result: ResponseBody::Empty }));
 

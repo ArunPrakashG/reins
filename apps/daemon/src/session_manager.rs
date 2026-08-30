@@ -79,16 +79,44 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Forwards one keystroke into a session's pane — the general-purpose sibling of
+    /// [`Self::interrupt`], which only ever sends the harness's fixed interrupt
+    /// sequence. See [`crate::tmux::TmuxController::send_literal`] /
+    /// [`crate::tmux::TmuxController::send_key_token`] for what each `KeyInput`
+    /// variant actually does.
+    pub fn send_key_input(
+        &self,
+        tmux_session_name: &str,
+        input: &proto::KeyInput,
+    ) -> Result<(), SessionManagerError> {
+        match input {
+            proto::KeyInput::Literal { text } => self.tmux.send_literal(tmux_session_name, text)?,
+            proto::KeyInput::Named { token } => self.tmux.send_key_token(tmux_session_name, token)?,
+        }
+        Ok(())
+    }
+
     /// Lists sessions from the store, optionally filtered by project id.
     pub fn list_sessions(&self, project_id: Option<&str>) -> Result<Vec<Session>, SessionManagerError> {
         Ok(self.store.list_sessions(project_id)?)
     }
 
-    /// Captures the current tmux pane text for a session. On-demand passthrough for
-    /// MVP: called fresh per request (see `Request::GetPaneSnapshot`) rather than
-    /// backed by a background poller.
+    /// Captures the current tmux pane's plain text for a session — used for
+    /// harness-status detection (see `capture_pane_and_sync_status` in `rpc_server.rs`),
+    /// which matches on plain content and has no use for escape codes.
     pub fn capture_pane(&self, tmux_session_name: &str) -> Result<String, SessionManagerError> {
         Ok(self.tmux.capture_pane(tmux_session_name)?)
+    }
+
+    /// Captures the current tmux pane with color/style escape codes and cursor
+    /// position, for the TUI's live `vt100`-backed rendering (see
+    /// `Request::GetPaneSnapshot`). On-demand passthrough for MVP: called fresh per
+    /// request rather than backed by a background poller.
+    pub fn capture_pane_live(
+        &self,
+        tmux_session_name: &str,
+    ) -> Result<crate::tmux::PaneCapture, SessionManagerError> {
+        Ok(self.tmux.capture_pane_live(tmux_session_name)?)
     }
 
     /// Finds a single session by its id, via an indexed primary-key lookup in the store

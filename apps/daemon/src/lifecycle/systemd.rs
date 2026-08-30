@@ -84,6 +84,28 @@ pub fn enable_linger(user: &str) -> Result<(), LifecycleError> {
     Ok(())
 }
 
+/// Enables linger via an interactive `sudo` re-invocation of `loginctl
+/// enable-linger`, inheriting the caller's stdin/stdout/stderr (via
+/// [`Command::status`], unlike [`enable_linger`]'s use of `.output()`) so `sudo`
+/// can print its password prompt and read the reply from the real terminal.
+///
+/// Callers are expected to tell the user a password prompt is coming *before*
+/// calling this — `sudo`'s own prompt gives no advance warning, and appearing
+/// out of nowhere mid-wizard reads as suspicious.
+pub fn enable_linger_via_sudo(user: &str) -> Result<(), LifecycleError> {
+    let status = std::process::Command::new("sudo")
+        .args(["loginctl", "enable-linger", user])
+        .status()?;
+    if !status.success() {
+        return Err(LifecycleError::CommandFailed(
+            format!("sudo loginctl enable-linger {user}"),
+            "sudo did not succeed (password rejected, prompt cancelled, or sudo unavailable)"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn run(args: &[&str]) -> Result<(), LifecycleError> {
     let output = std::process::Command::new("systemctl").args(args).output()?;
     if !output.status.success() {
