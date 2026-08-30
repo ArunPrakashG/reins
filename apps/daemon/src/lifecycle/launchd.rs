@@ -63,6 +63,35 @@ pub fn start_if_installed() -> Result<bool, LifecycleError> {
     Ok(true)
 }
 
+/// Restarts the `reinsd` daemon if it's installed, so an in-place binary swap
+/// takes effect immediately rather than waiting for the next login. Returns
+/// `Ok(false)` (not an error) when it isn't installed — same convention as
+/// [`start_if_installed`]. Uses `launchctl kickstart -k`, which kills the
+/// existing instance (if any) and starts a fresh one in a single call, rather
+/// than a separate stop/start pair.
+pub fn restart_if_installed() -> Result<bool, LifecycleError> {
+    if !is_installed() {
+        return Ok(false);
+    }
+    let uid = current_uid()?;
+    run(&["kickstart", "-k", &format!("gui/{uid}/dev.reins.daemon")])?;
+    Ok(true)
+}
+
+/// Whether the `reinsd` daemon is currently active (running), as opposed to
+/// merely installed. Used after a restart to sanity-check the new binary
+/// actually came back up.
+pub fn is_active() -> bool {
+    let Ok(uid) = current_uid() else {
+        return false;
+    };
+    std::process::Command::new("launchctl")
+        .args(["print", &format!("gui/{uid}/dev.reins.daemon")])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Resolves the current user's UID by shelling out to `id -u` and parsing its output.
 /// This avoids adding a dependency on `libc`/`nix` for a single system call.
 fn current_uid() -> Result<u32, LifecycleError> {

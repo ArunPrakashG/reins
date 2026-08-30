@@ -56,6 +56,29 @@ pub fn start_if_installed() -> Result<bool, LifecycleError> {
     Ok(true)
 }
 
+/// Restarts the `reinsd` service if it's installed, so an in-place binary swap
+/// takes effect immediately rather than waiting for the next login. Returns
+/// `Ok(false)` (not an error) when it isn't installed — same convention as
+/// [`start_if_installed`].
+pub fn restart_if_installed() -> Result<bool, LifecycleError> {
+    if !is_installed() {
+        return Ok(false);
+    }
+    run(&["--user", "restart", "reinsd"])?;
+    Ok(true)
+}
+
+/// Whether the `reinsd` service is currently active (running), as opposed to
+/// merely installed. Used after a restart to sanity-check the new binary
+/// actually came back up.
+pub fn is_active() -> bool {
+    std::process::Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", "reinsd"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Enables "linger" for `user`, so their systemd `--user` instance (and therefore
 /// `reinsd`) keeps running after their last login session ends, instead of being
 /// torn down by systemd-logind.
@@ -202,5 +225,18 @@ mod tests {
 
         // Teardown (disable --now, remove unit, daemon-reload) runs via the `Teardown`
         // guard's Drop impl above, so it still happens if an assertion above panics.
+    }
+
+    #[test]
+    fn restart_if_installed_returns_false_when_not_installed() {
+        if !systemctl_available() {
+            eprintln!("skipping: systemctl not available");
+            return;
+        }
+        if is_installed() {
+            eprintln!("skipping: a reinsd unit is already installed on this machine");
+            return;
+        }
+        assert_eq!(restart_if_installed().unwrap(), false);
     }
 }
