@@ -3,3 +3,4 @@
 *.db-journal
 
 builds/*
+.worktrees/
