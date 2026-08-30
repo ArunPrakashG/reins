@@ -69,6 +69,22 @@ reins config
 Settings are stored in `$XDG_CONFIG_HOME/reins/config.toml` (or
 `~/.config/reins/config.toml`).
 
+### Updating
+
+Run `reins update` at any time to check GitHub Releases for a newer version and,
+if one exists, download it, verify its checksum, install it, and restart the
+daemon:
+
+```bash
+reins update
+```
+
+`reins` also runs this check automatically in the background at most once every
+24 hours on startup — it never blocks startup or touches disk beyond a small
+rate-limit state file, and if a newer version is found the status line shows an
+" update available: vX.Y.Z — run `reins update` " notice (lowest priority: any
+in-loop error or status message takes over the status line first).
+
 ## Paths
 
 Both the daemon and TUI resolve the same paths:
@@ -78,6 +94,7 @@ Both the daemon and TUI resolve the same paths:
 | Control socket | `$XDG_RUNTIME_DIR/reins/reinsd.sock`, else `~/.local/state/reins/reinsd.sock` (directory forced to mode 0700, socket to 0600) |
 | Roster database | `$XDG_DATA_HOME/reins/reins.db`, else `~/.local/share/reins/reins.db` |
 | Config file | `$XDG_CONFIG_HOME/reins/config.toml`, else `~/.config/reins/config.toml` |
+| Update-check state | `$XDG_STATE_HOME/reins/update-check.json`, else `~/.local/state/reins/update-check.json` |
 
 The roster database stores session **metadata only** — never
 conversation content. Because it persists across restarts while tmux

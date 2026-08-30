@@ -58,15 +58,20 @@ pub async fn check_for_update(current_version: &str) -> Result<UpdateCheck, Upda
 /// error or slow down startup. Returns `Some(version)` only when a genuinely
 /// newer release is available and worth a status-line notice; the version string
 /// is exactly the GitHub tag (e.g. `"v0.2.0"`).
-pub async fn background_check(current_version: &str) -> Option<String> {
+///
+/// Takes an owned `String` (rather than `&str`) so callers can `tokio::spawn` this
+/// as a `'static` background task instead of awaiting it inline on the startup path.
+pub async fn background_check(current_version: String) -> Option<String> {
     let now = now_unix();
     let mut saved_state = state::load_state();
 
     if !state::should_check(&saved_state, now, state::CHECK_INTERVAL_SECS) {
-        return saved_state.latest_known_version;
+        return saved_state
+            .latest_known_version
+            .filter(|v| release::version_is_newer(&current_version, v));
     }
 
-    let result = check_for_update(current_version).await;
+    let result = check_for_update(&current_version).await;
     saved_state.last_checked_unix = now;
     let available_version = match result {
         Ok(UpdateCheck::Available { version, .. }) => Some(version),
@@ -138,7 +143,16 @@ pub async fn run_update(
     if let Err(err) = restart_daemon() {
         let _ = install::rollback(reins_path);
         let _ = install::rollback(reinsd_path);
-        return Err(err);
+        // Restore the old binary *files*, then also make sure the old binary is what
+        // is actually *running* — otherwise a failed restart can leave the daemon
+        // dead (or running the new, unverified-to-work binary) while disk holds the
+        // old one, which is exactly the half-applied state rollback exists to avoid.
+        return Err(match restart_daemon() {
+            Ok(()) => err,
+            Err(e2) => UpdaterError::InvalidPayload(format!(
+                "{err}; rolled back binaries but could not restart reinsd: {e2}"
+            )),
+        });
     }
 
     progress(&format!("Updated to {version}."));
@@ -211,6 +225,18 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Shared by `mod.rs`'s and `state.rs`'s test modules to guard `XDG_STATE_HOME`
+/// mutation — both files' tests redirect it to an isolated temp dir so `cargo test`
+/// never touches the developer's real `~/.local/state/reins/update-check.json` (see
+/// the doc comment on each test that uses this). A single shared mutex, rather than
+/// one per file, is required because both test modules run as threads in the same
+/// binary and would otherwise race each other's save/restore of the same env var.
+#[cfg(test)]
+pub(crate) fn xdg_state_home_test_mutex() -> &'static std::sync::Mutex<()> {
+    static MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    MUTEX.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,20 +258,60 @@ mod tests {
         }
     }
 
+    // The mutex guard below is deliberately held across the `background_check(...)`
+    // .await: this is a `tokio::test` current-thread-runtime test, so nothing else
+    // ever runs during that await, and the guard *must* stay held through it — its
+    // whole purpose is to stop another test thread from repointing XDG_STATE_HOME
+    // out from under this one while background_check is mid-flight (which itself
+    // resolves that path via `proto::update_state_path`). A `std::sync::Mutex` is
+    // fine here (this crate has no other async code contending on it).
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn background_check_respects_rate_limit_without_touching_the_network() {
+        // Redirects XDG_STATE_HOME to an isolated temp dir for the duration of this
+        // test (mirroring ui/tui/src/config.rs's HOME/XDG_CONFIG_HOME save-restore
+        // pattern for its own tests) so this never reads or overwrites the
+        // developer's real `~/.local/state/reins/update-check.json` — without this,
+        // the save below would stamp a fake "v9.9.9 available" notice into the real
+        // state file, which `reins` would then show as a false update notice for the
+        // next 24 hours.
+        let _guard = xdg_state_home_test_mutex().lock().unwrap();
+        let old_xdg_state = std::env::var("XDG_STATE_HOME").ok();
+
+        let thread_id = std::thread::current().id();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let temp_state = std::env::temp_dir()
+            .join(format!("reins-updater-test-{:?}-{}", thread_id, timestamp));
+        let _ = std::fs::remove_dir_all(&temp_state);
+        std::fs::create_dir_all(&temp_state).expect("create temp test dir");
+        std::env::set_var("XDG_STATE_HOME", &temp_state);
+
         // Pin an already-recent last_checked_unix directly via the state module's
         // own round trip, so this test doesn't depend on network access at all.
         let recent_state = state::UpdateCheckState {
             last_checked_unix: now_unix(),
             latest_known_version: Some("v9.9.9".to_string()),
         };
-        // Best-effort: if this environment can't resolve a state path (no HOME),
-        // there's nothing to assert.
-        if state::save_state(&recent_state).is_err() {
-            return;
+        let save_result = state::save_state(&recent_state);
+        let result = if save_result.is_ok() {
+            Some(background_check("0.1.2".to_string()).await)
+        } else {
+            None
+        };
+
+        if let Some(x) = old_xdg_state {
+            std::env::set_var("XDG_STATE_HOME", x);
+        } else {
+            std::env::remove_var("XDG_STATE_HOME");
         }
-        let result = background_check("0.1.2").await;
+        let _ = std::fs::remove_dir_all(&temp_state);
+
+        // Best-effort: if this environment somehow still can't resolve a state path,
+        // there's nothing to assert.
+        let Some(result) = result else { return };
         assert_eq!(result, Some("v9.9.9".to_string()));
     }
 

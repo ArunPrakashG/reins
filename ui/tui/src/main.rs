@@ -250,9 +250,13 @@ async fn run() -> anyhow::Result<()> {
     let mut app = App::new();
     app.animations_enabled = config::load().animations;
 
-    if let Some(version) = daemon::updater::background_check(env!("CARGO_PKG_VERSION")).await {
-        app.update_available = Some(version);
-    }
+    // Spawned rather than awaited inline: a background check must never block the
+    // TUI's startup on a GitHub round-trip (DNS/TCP/TLS/HTTP, up to reqwest's
+    // timeout). The event loop polls this handle once per tick (see `event_loop`)
+    // and applies the result whenever it happens to finish, even mid-session.
+    let mut update_check_handle = Some(tokio::spawn(daemon::updater::background_check(
+        env!("CARGO_PKG_VERSION").to_string(),
+    )));
 
     refresh_sessions(&rpc, &mut app).await;
     // The initial refresh happens before the terminal is put into raw mode, so a
@@ -270,7 +274,8 @@ async fn run() -> anyhow::Result<()> {
     // scope), so this is unconditional rather than `#[cfg(unix)]`-gated at the call site.
     let quit_signal = spawn_quit_signal_watcher();
 
-    let result = event_loop(&mut terminal, &mut app, &rpc, &quit_signal).await;
+    let result =
+        event_loop(&mut terminal, &mut app, &rpc, &quit_signal, &mut update_check_handle).await;
     restore_terminal(&mut terminal)?;
     result
 }
@@ -438,9 +443,25 @@ async fn event_loop(
     app: &mut App,
     rpc: &RpcClient,
     quit_signal: &AtomicBool,
+    update_check_handle: &mut Option<tokio::task::JoinHandle<Option<String>>>,
 ) -> anyhow::Result<()> {
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
+
+        // Non-blocking poll of the background update check spawned in `run()`: once
+        // it finishes, apply the result and drop the handle. Never awaited directly —
+        // that would reintroduce the startup stall this whole indirection exists to
+        // avoid. Piggybacks on the existing per-tick loop rather than adding a new
+        // poll mechanism.
+        if let Some(handle) = update_check_handle.take() {
+            if handle.is_finished() {
+                if let Ok(Some(version)) = handle.await {
+                    app.update_available = Some(version);
+                }
+            } else {
+                *update_check_handle = Some(handle);
+            }
+        }
 
         // An external SIGINT/SIGTERM (see `spawn_quit_signal_watcher`) goes through
         // the exact same confirm-to-quit flow a keyboard quit does, rather than

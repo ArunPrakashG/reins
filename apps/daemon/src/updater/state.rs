@@ -6,16 +6,10 @@ use serde::{Deserialize, Serialize};
 /// 24 hours.
 pub const CHECK_INTERVAL_SECS: i64 = 24 * 60 * 60;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UpdateCheckState {
     pub last_checked_unix: i64,
     pub latest_known_version: Option<String>,
-}
-
-impl Default for UpdateCheckState {
-    fn default() -> Self {
-        Self { last_checked_unix: 0, latest_known_version: None }
-    }
 }
 
 /// Never errors — a missing, unreadable, or corrupt state file just means "we've
@@ -45,6 +39,30 @@ pub fn should_check(state: &UpdateCheckState, now_unix: i64, interval_secs: i64)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Guards every test in this crate that mutates `XDG_STATE_HOME` (or reads
+    /// through it) — shared with `super::super::tests` (this module's sibling test
+    /// module in `mod.rs`) via [`crate::updater::xdg_state_home_test_mutex`] so the
+    /// two modules' tests, which run as separate threads in the same binary, can't
+    /// race each other's env var save/restore. Mirrors `ui/tui/src/config.rs`'s
+    /// `test_mutex` pattern for the same class of problem.
+    fn test_mutex() -> &'static Mutex<()> {
+        crate::updater::xdg_state_home_test_mutex()
+    }
+
+    fn temp_state_dir() -> std::path::PathBuf {
+        let thread_id = std::thread::current().id();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir()
+            .join(format!("reins-state-test-{:?}-{}", thread_id, timestamp));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp test dir");
+        dir
+    }
 
     #[test]
     fn should_check_true_when_never_checked() {
@@ -66,9 +84,23 @@ mod tests {
 
     #[test]
     fn load_state_defaults_when_home_points_nowhere_useful() {
-        // Not asserting file I/O here (that's covered by proto's own path tests) —
-        // just that a garbage/missing file never panics or errors out of load_state.
+        let _guard = test_mutex().lock().unwrap();
+        let old_xdg_state = std::env::var("XDG_STATE_HOME").ok();
+
+        // Point XDG_STATE_HOME at a fresh, empty temp dir — no `reins/update-check.json`
+        // exists there, so load_state must fall back to the default without touching
+        // (or corrupting) the developer's real state file.
+        let temp_state = temp_state_dir();
+        std::env::set_var("XDG_STATE_HOME", &temp_state);
+
         let state = load_state();
-        assert!(state.last_checked_unix >= 0 || state.last_checked_unix == 0);
+        assert_eq!(state, UpdateCheckState::default());
+
+        if let Some(x) = old_xdg_state {
+            std::env::set_var("XDG_STATE_HOME", x);
+        } else {
+            std::env::remove_var("XDG_STATE_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&temp_state);
     }
 }

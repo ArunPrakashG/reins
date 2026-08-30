@@ -81,13 +81,36 @@ tar -czf "$ASSET_PATH" -C "$BUILD_DIR" reins reinsd
 
 echo "==> Computing checksums"
 SUMS_PATH="$BUILD_DIR/SHA256SUMS"
-(cd "$BUILD_DIR" && sha256sum "$ASSET_NAME" > "SHA256SUMS")
+# sha256sum is GNU coreutils and isn't present on stock macOS (which ships
+# `shasum -a 256` instead); prefer sha256sum where it exists, fall back otherwise.
+# Both produce the same `<hex>  <filename>` line format the updater's checksum
+# parser (apps/daemon/src/updater/mod.rs, run_update) expects.
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA_CMD="sha256sum"
+else
+    SHA_CMD="shasum -a 256"
+fi
+(cd "$BUILD_DIR" && $SHA_CMD "$ASSET_NAME" > "SHA256SUMS")
 
 if [[ "${SKIP_PUBLISH:-}" == "1" ]]; then
     echo "==> SKIP_PUBLISH=1 set, not publishing a GitHub release"
 elif ! command -v gh >/dev/null 2>&1; then
     echo "==> 'gh' CLI not found, skipping GitHub release publish"
     echo "    (install it, or re-run with SKIP_PUBLISH=1 to silence this)"
+elif gh release view "v$NEW_VERSION" >/dev/null 2>&1; then
+    # Release already exists — this is a second (or later) platform's build for the
+    # same version. Merge this platform's checksum line into the existing SHA256SUMS
+    # asset rather than clobbering it, so the release ends up with one SHA256SUMS
+    # file covering every platform built for this version, not just the most recent.
+    echo "==> Release v$NEW_VERSION already exists, uploading additional platform asset"
+    EXISTING_SUMS="$(mktemp)"
+    if gh release download "v$NEW_VERSION" --pattern SHA256SUMS --output "$EXISTING_SUMS" --clobber 2>/dev/null; then
+        MERGED_SUMS="$(mktemp)"
+        cat "$EXISTING_SUMS" "$SUMS_PATH" | sort -u -k2 > "$MERGED_SUMS"
+        mv "$MERGED_SUMS" "$SUMS_PATH"
+    fi
+    rm -f "$EXISTING_SUMS"
+    gh release upload "v$NEW_VERSION" "$ASSET_PATH" "$SUMS_PATH" --clobber
 else
     echo "==> Publishing GitHub release v$NEW_VERSION"
     gh release create "v$NEW_VERSION" \

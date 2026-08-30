@@ -213,26 +213,24 @@ fn draw_status_line(frame: &mut Frame, app: &App, area: Rect) {
     // is going to the pane, so the legend needs to say so); an open hire dialog owns
     // the input hint next (its own detail lives in the dialog itself, drawn
     // separately); a live quit-confirmation warning is the most urgent thing to show
-    // once neither of those is active; then a background-check update notice; then a
-    // one-shot status message; then the default key legend.
+    // once neither of those is active; then a one-shot status message (this is the
+    // in-loop error-reporting channel, so it must not be permanently starved by the
+    // update notice below — see the background-check update notice arm); then a
+    // background-check update notice; then the default key legend.
     let text = if app.is_focused() {
         "FOCUSED — typing goes to the pane. Ctrl-B d: back to roster".to_string()
     } else if app.input_mode.is_some() {
         "Esc: cancel".to_string()
     } else if app.quit_warning_active() {
         "press q or Ctrl+C again to quit".to_string()
+    } else if let Some(message) = &app.status_message {
+        // In-loop errors surface here rather than on stderr, which would corrupt
+        // the raw-mode frame.
+        format!("{message}  (any key to dismiss)")
     } else if let Some(version) = &app.update_available {
         format!(" update available: {version} — run `reins update` ")
     } else {
-        match &app.status_message {
-            // In-loop errors surface here rather than on stderr, which would corrupt
-            // the raw-mode frame.
-            Some(message) => format!("{message}  (any key to dismiss)"),
-            None => {
-                "q: quit  up/down: select  Enter: focus pane  h: hire  r: release  i: interrupt"
-                    .to_string()
-            }
-        }
+        "q: quit  up/down: select  Enter: focus pane  h: hire  r: release  i: interrupt".to_string()
     };
     frame.render_widget(Paragraph::new(text), area);
 }
