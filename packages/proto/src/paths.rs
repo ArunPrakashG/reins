@@ -120,6 +120,18 @@ fn setup_marker_dir() -> io::Result<PathBuf> {
     Ok(PathBuf::from(home).join(".local/state/reins"))
 }
 
+/// Resolves the path of the self-updater's rate-limit state file, creating its
+/// parent directory if needed.
+///
+/// Resolution order:
+/// 1. `$XDG_STATE_HOME/reins/update-check.json` — if `XDG_STATE_HOME` is set
+/// 2. `~/.local/state/reins/update-check.json` — fallback using HOME
+pub fn update_state_path() -> io::Result<PathBuf> {
+    let dir = setup_marker_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join("update-check.json"))
+}
+
 /// Resolves the path of the reins configuration file, creating its parent
 /// directory if needed.
 ///
@@ -224,5 +236,13 @@ mod tests {
         assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("config.toml"));
         let parent = path.parent().expect("config file path always has a parent");
         assert!(parent.exists(), "config file parent directory should exist after calling config_file_path");
+    }
+
+    #[test]
+    fn update_state_path_ends_with_expected_filename() {
+        let Ok(path) = update_state_path() else {
+            return;
+        };
+        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("update-check.json"));
     }
 }
