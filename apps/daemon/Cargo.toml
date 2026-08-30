@@ -19,8 +19,11 @@ proto = { path = "../../packages/proto" }
 tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
 vt100 = "0.15"
 
 [dev-dependencies]

@@ -10,6 +10,7 @@ pub mod lifecycle;
 pub mod rpc_server;
 pub mod session_manager;
 pub mod tmux;
+pub mod updater;
 
 pub use session_manager::{SessionManager, SessionManagerError};
 pub use tmux::{TmuxController, TmuxError};
