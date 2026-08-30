@@ -217,6 +217,9 @@ async fn run() -> anyhow::Result<()> {
                 setup::run_setup(&registry(), &profiles()?);
                 return Ok(());
             }
+            "update" => {
+                return handle_update_subcommand().await;
+            }
             _ => {}
         }
     }
@@ -246,6 +249,11 @@ async fn run() -> anyhow::Result<()> {
 
     let mut app = App::new();
     app.animations_enabled = config::load().animations;
+
+    if let Some(version) = daemon::updater::background_check(env!("CARGO_PKG_VERSION")).await {
+        app.update_available = Some(version);
+    }
+
     refresh_sessions(&rpc, &mut app).await;
     // The initial refresh happens before the terminal is put into raw mode, so a
     // failure here can still be reported the ordinary way on stderr. Every later
@@ -315,6 +323,39 @@ fn handle_config_subcommand(args: &[String]) -> anyhow::Result<()> {
             config::save(&cfg)?;
             Ok(())
         }
+    }
+}
+
+/// Runs `reins update`: checks GitHub Releases and, if a newer version exists,
+/// downloads, verifies, and installs it, restarting `reinsd` in the process. Prints
+/// progress to stdout as it goes — this is a synchronous CLI flow, not something the
+/// TUI ever triggers on its own (see the plan's "manual install" trigger model).
+async fn handle_update_subcommand() -> anyhow::Result<()> {
+    let current_exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("could not resolve the running `reins` binary's path: {e}"))?;
+    let reinsd_path = current_exe
+        .parent()
+        .map(|dir| dir.join("reinsd"))
+        .ok_or_else(|| anyhow::anyhow!("could not resolve `reinsd`'s expected path next to `reins`"))?;
+
+    let result = daemon::updater::run_update(
+        env!("CARGO_PKG_VERSION"),
+        &current_exe,
+        &reinsd_path,
+        |line| println!("{line}"),
+    )
+    .await;
+
+    match result {
+        Ok(version) if version == env!("CARGO_PKG_VERSION") => {
+            println!("Already on the latest version ({version}).");
+            Ok(())
+        }
+        Ok(version) => {
+            println!("Update complete — now on {version}.");
+            Ok(())
+        }
+        Err(err) => Err(anyhow::anyhow!("update failed: {err}")),
     }
 }
 

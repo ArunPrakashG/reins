@@ -213,14 +213,16 @@ fn draw_status_line(frame: &mut Frame, app: &App, area: Rect) {
     // is going to the pane, so the legend needs to say so); an open hire dialog owns
     // the input hint next (its own detail lives in the dialog itself, drawn
     // separately); a live quit-confirmation warning is the most urgent thing to show
-    // once neither of those is active; then a one-shot status message; then the
-    // default key legend.
+    // once neither of those is active; then a background-check update notice; then a
+    // one-shot status message; then the default key legend.
     let text = if app.is_focused() {
         "FOCUSED — typing goes to the pane. Ctrl-B d: back to roster".to_string()
     } else if app.input_mode.is_some() {
         "Esc: cancel".to_string()
     } else if app.quit_warning_active() {
         "press q or Ctrl+C again to quit".to_string()
+    } else if let Some(version) = &app.update_available {
+        format!(" update available: {version} — run `reins update` ")
     } else {
         match &app.status_message {
             // In-loop errors surface here rather than on stderr, which would corrupt

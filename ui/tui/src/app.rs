@@ -94,6 +94,11 @@ pub struct App {
     /// [`QUIT_CONFIRM_WINDOW`]. Set and read via [`Self::request_quit`] and
     /// [`Self::quit_warning_active`] — never assigned directly outside those.
     quit_requested_at: Option<Instant>,
+    /// Set when a background version check (see `daemon::updater::background_check`)
+    /// finds a newer release. Holds the raw GitHub tag (e.g. `"v0.2.0"`). Shown in the
+    /// status line at lowest priority — the quit-warning and focus-mode indicators
+    /// both still take over the line ahead of this.
+    pub update_available: Option<String>,
 }
 
 impl App {
@@ -117,6 +122,7 @@ impl App {
             started_at: Instant::now(),
             animations_enabled: true,
             quit_requested_at: None,
+            update_available: None,
         }
     }
 
@@ -540,6 +546,12 @@ mod tests {
         assert_eq!(app.status_message.as_deref(), Some("hire failed: nope"));
         app.clear_status_message();
         assert_eq!(app.status_message, None);
+    }
+
+    #[test]
+    fn update_available_starts_unset() {
+        let app = App::new();
+        assert_eq!(app.update_available, None);
     }
 
     #[test]
